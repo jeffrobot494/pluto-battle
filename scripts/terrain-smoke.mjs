@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright';
+import { createServer } from 'vite';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+const server = await createServer({ server: { host: '127.0.0.1', port: 5194, strictPort: true } }); await server.listen();
+const candidate = `${process.env.USERPROFILE}/AppData/Local/ms-playwright/chromium-1169/chrome-win/chrome.exe`;
+const browser = await chromium.launch({ executablePath: process.env.BATTLE_CHROMIUM ?? (existsSync(candidate) ? candidate : undefined), args: ['--use-angle=d3d11', '--force_high_performance_gpu'] });
+const errors = [], reports = {};
+try {
+  await mkdir('artifacts', { recursive: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto('http://127.0.0.1:5194/?terrain=189423'); await page.waitForFunction(() => window.__battle?.ready);
+  await page.evaluate(() => window.__battle.setPaused(true));
+  await page.screenshot({ path: 'artifacts/terrain-deployment.png' });
+  assert.equal(await page.evaluate(() => window.__battle.terrainSeed), 189423);
+  assert.ok(await page.evaluate(() => window.__battle.sim.terrain.rocks.length) > 0);
+  const initial = await page.evaluate(() => { const g=window.__battle; return { seed:g.terrainSeed,x:Array.from(g.sim.x),z:Array.from(g.sim.z),h:Array.from(g.sim.terrain.heights) }; });
+  await page.evaluate(() => { const g=window.__battle; g.step(600); });
+  await page.screenshot({ path: 'artifacts/terrain-combat.png' });
+  reports.combat = await page.evaluate(() => { const g=window.__battle; return { shots:g.sim.totalShots,live:Array.from(g.sim.alive),stats:g.performance() }; });
+  assert.ok(reports.combat.shots > 0);
+  await page.evaluate(() => { const g=window.__battle; g.replay(); g.setPaused(true); g.renderer.update(g.sim,1,0); });
+  const replay = await page.evaluate(() => { const g=window.__battle; return { seed:g.terrainSeed,x:Array.from(g.sim.x),z:Array.from(g.sim.z),h:Array.from(g.sim.terrain.heights) }; });
+  assert.deepEqual(replay, initial);
+  const resources = await page.evaluate(() => ({ g:window.__battle.renderer.webgl.info.memory.geometries,t:window.__battle.renderer.webgl.info.memory.textures }));
+  const seeds = new Set();
+  for(let i=0;i<20;i++) {
+    const snapshot=await page.evaluate(() => { const g=window.__battle; g.restart(); g.setPaused(true); g.renderer.update(g.sim,1,0); return {seed:g.terrainSeed,g:g.renderer.webgl.info.memory.geometries,t:g.renderer.webgl.info.memory.textures}; });
+    seeds.add(snapshot.seed); assert.equal(snapshot.g,resources.g); assert.equal(snapshot.t,resources.t);
+  }
+  assert.equal(seeds.size,20); reports.resetResources=resources;
+  await page.evaluate(() => { const g=window.__battle; g.restart(500,74319,74319); g.setPaused(true); g.sim.hp.fill(1e8,0,g.sim.used); g.step(600); });
+  assert.deepEqual(await page.evaluate(() => Array.from(window.__battle.sim.alive)),[500,500]);
+  await page.screenshot({ path:'artifacts/terrain-1000.png' });
+  reports.thousand=await page.evaluate(() => window.__battle.performance());
+  const mobile = await browser.newContext({ viewport:{width:412,height:915},deviceScaleFactor:2,isMobile:true,hasTouch:true });
+  const phone=await mobile.newPage(); phone.on('pageerror',e=>errors.push(e.message));
+  await phone.goto('http://127.0.0.1:5194/?terrain=74319'); await phone.waitForFunction(()=>window.__battle?.ready);
+  await phone.evaluate(()=>{const g=window.__battle;g.restart(500,74319,74319);g.setPaused(true);g.sim.hp.fill(1e8,0,g.sim.used);g.step(480);});
+  assert.equal(await phone.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await phone.screenshot({path:'artifacts/terrain-mobile-1000.png'});
+  await phone.tap('#diagnostics-toggle'); assert.equal(await phone.locator('#diagnostics').isVisible(),true);
+  assert.match(await phone.locator('#metrics').innerText(),/Terrain seed/);
+  reports.mobile=await phone.evaluate(()=>window.__battle.performance());
+  await phone.evaluate(()=>window.__battle.startBenchmark(0,1));
+  await phone.waitForFunction(()=>window.__battle.benchmark.report!==null,null,{timeout:15000});
+  const capture=await phone.evaluate(()=>window.__battle.benchmark.report);assert.equal(capture.live,1000);assert.ok(capture.samples>10);assert.ok(capture.durationSeconds>=1);
+  assert.equal(await phone.locator('#benchmark-save').isDisabled(),false);reports.capture=capture;
+  await phone.evaluate(()=>{const g=window.__battle;g.startBenchmark(0,10);g.setPaused(true);});
+  assert.equal(await phone.evaluate(()=>window.__battle.benchmark.active),false);
+  assert.deepEqual(errors,[]);
+  await writeFile('artifacts/terrain-browser-report.json',JSON.stringify({passed:true,reports,errors},null,2));console.log(JSON.stringify({passed:true,reports,errors},null,2));
+} finally {await browser.close();await server.close();}

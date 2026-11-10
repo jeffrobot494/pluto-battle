@@ -13,7 +13,12 @@
     "benchmark": "node scripts/benchmark.mjs",
     "test:balance": "node --experimental-strip-types --no-warnings scripts/balance-check.mjs",
     "test:tuning": "node scripts/tuning-smoke.mjs",
-    "test:equipment": "node scripts/equipment-smoke.mjs"
+    "test:equipment": "node scripts/equipment-smoke.mjs",
+    "test:terrain:browser": "node scripts/terrain-smoke.mjs",
+    "test:browser:all": "node scripts/browser-regressions.mjs",
+    "benchmark:terrain": "node scripts/terrain-benchmark.mjs",
+    "test:terrain:campaign": "node --experimental-strip-types --no-warnings scripts/terrain-campaign.mjs",
+    "test:cover:browser": "node scripts/cover-smoke.mjs"
   },
   "dependencies": { "three": "0.170.0" },
   "devDependencies": { "@types/three": "0.170.0", "typescript": "5.9.3", "vite": "6.4.5", "playwright": "1.49.1" }

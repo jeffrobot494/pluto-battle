@@ -8,6 +8,8 @@ import { TuningPanel } from './tuning-panel.ts';
 import { BattleAudio, SOUND_EFFECTS } from './audio.ts';
 import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from './equipment.ts';
 import { EquipmentPanel } from './equipment-panel.ts';
+import { prepareTerrain } from './navigation.ts';
+import { PerformanceCapture } from './performance-capture.ts';
 
 const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
@@ -51,8 +53,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <aside id="diagnostics" hidden aria-label="Performance and battle settings">
       <div class="panel-heading"><span>FIELD DIAGNOSTICS</span><button id="close-diagnostics" aria-label="Close diagnostics">×</button></div>
       <dl id="metrics"></dl>
-      <div class="settings"><label for="deployment">Deployment preset <select id="deployment"><option value="custom" disabled>Custom · tuning panel</option><option value="100">100 vs 100</option><option value="250">250 vs 250 · stress test</option><option value="500">500 vs 500 · stress test</option></select></label><label for="quality">Visual quality <select id="quality"><option value="balanced">Balanced · 1.5× pixel cap</option><option value="low">Low · 1× pixel cap</option></select></label><button id="apply-battle">Deploy preset ${icons.restart}</button></div>
-      <p>Stress tests measure scaling. Phone performance requires testing on a physical device.</p>
+      <div class="settings"><label for="deployment">Deployment preset <select id="deployment"><option value="custom" disabled>Custom · tuning panel</option><option value="100">100 vs 100</option><option value="250">250 vs 250</option><option value="500">500 vs 500</option></select></label><label for="quality">Visual quality <select id="quality"><option value="balanced">Adaptive · up to 1.5× pixels</option><option value="low">Low · up to 1× pixels</option></select></label><button id="apply-battle">Deploy preset ${icons.restart}</button></div>
+      <p>Every restart explores new terrain. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
+      <div class="settings"><button id="benchmark-start">Benchmark 500 vs 500 · 15 min</button><button id="benchmark-save" disabled>Save benchmark report</button></div>
+      <p id="benchmark-status" role="status">5-minute warmup, then 10-minute recording. Keep the page visible.</p>
     </aside>
     <div id="error" hidden role="alert"></div>
   </main>`;
@@ -90,12 +94,19 @@ document.addEventListener('keydown', unlockAudio, { capture: true, signal: audio
 soundPanel.addEventListener('toggle', () => { if (soundPanel.open) { toggleDiagnostics(false); tuningPanel?.toggle(false); equipmentPanel?.toggle(false); } });
 
 let perTeam = tuning.count, seed = tuning.seed;
-let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, equipment), paused = false, accumulator = 0, endAge = 0;
+const parameters = new URLSearchParams(location.search);
+const flatFixture = parameters.get('flat') === '1';
+function freshTerrainSeed() { return crypto.getRandomValues(new Uint32Array(1))[0]; }
+let terrainSeed = parameters.has('terrain') ? Number(parameters.get('terrain')) >>> 0 : freshTerrainSeed();
+let prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
+let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
 audio.reset(sim);
 let previousTime = 0, lastHudUpdate = -Infinity, hidden = document.hidden, frameHandle = 0;
 let simMs = 0, renderMs = 0, lastElapsed = 16.67, frames = 0, slowFrames = 0;
 const intervals = new Float32Array(360), samples: number[] = [];
 let intervalCursor = 0, intervalCount = 0;
+let droppedSimulationSeconds = 0;
+const capture = new PerformanceCapture(status => { $('#benchmark-status').textContent = status; $<HTMLButtonElement>('#benchmark-save').disabled = !capture.report; $('#benchmark-start').textContent = capture.active ? 'Stop benchmark' : 'Benchmark 500 vs 500 · 15 min'; });
 const plutoCount = $('#pluto-count'), sectoidCount = $('#sectoid-count'), battleTime = $('#battle-time');
 const plutoStrength = $('#pluto-strength'), sectoidStrength = $('#sectoid-strength');
 const stateLabel = $('#state-label'), outcome = $('#outcome'), pauseButton = $('#pause');
@@ -106,23 +117,29 @@ function toggleDiagnostics(force?: boolean) {
   if (open) { soundPanel.open = false; tuningPanel?.toggle(false); equipmentPanel?.toggle(false); updateHud(); }
 }
 function setPaused(value: boolean) {
+  if (value) stopBenchmark('Benchmark stopped: battle paused.');
   paused = value; accumulator = 0;
+  previousTime = 0;
   if (value) audio.stop();
   pauseButton.innerHTML = `${value ? icons.play : icons.pause}<span>${value ? 'Resume' : 'Pause'}</span>`;
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
-function restart(count?: number, nextSeed?: number) {
+function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   if (equipmentPanel && !equipmentPanel.valid) { tuningPanel.toggle(false); equipmentPanel.toggle(true); return false; }
+  stopBenchmark('Benchmark stopped: new battle.');
   const candidate = { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
   tuning = candidate;
   if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); equipmentPanel.toggle(false); tuningPanel.toggle(true); return false; }
   perTeam = tuning.count; seed = tuning.seed;
-  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, equipment); accumulator = 0; endAge = 0;
+  terrainSeed = nextTerrainSeed === undefined ? freshTerrainSeed() : nextTerrainSeed >>> 0;
+  prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
+  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
   audio.reset(sim);
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
+  previousTime = 0; droppedSimulationSeconds = 0;
   saveTuning(tuning); tuningPanel.sync(tuning, sim.tuning);
   saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, perTeam);
   $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
@@ -146,6 +163,12 @@ function performanceSnapshot() {
     textures: renderer.webgl.info.memory.textures,
     live: sim.alive[0] + sim.alive[1], capacity: sim.capacity,
     pixelRatio: renderer.webgl.getPixelRatio(), lastElapsed,
+    terrainSeed, terrainGenerationMs: sim.terrain.generationMs, terrainRepairs: sim.terrain.repairs,
+    navigationBuildMs: sim.navigation?.buildMs ?? 0, navigationExpansions: sim.navigation?.expansions ?? 0,
+    navigationPending: sim.navigation?.fields.filter(f => f.building).length ?? 0,
+    rayQueries: sim.terrain.rayQueries, rayCells: sim.terrain.rayCells,
+    renderScale: renderer.resolutionScale, simulationTick: sim.tick, droppedSimulationSeconds,
+    blockedUnits: sim.blockedUnits,
   };
 }
 
@@ -171,6 +194,10 @@ function updateHud() {
       ['Live units / effects', `${stats.live} / ${stats.activeEffects}`], ['Unit capacity', `${stats.capacity}`],
       ['Geometry / textures', `${stats.geometries} / ${stats.textures}`], ['Pixel ratio', `${stats.pixelRatio.toFixed(2)}×`],
       ['Frames > 33.4 ms', `${stats.slowFrames} / ${stats.frames}`],
+      ['Terrain seed', `${stats.terrainSeed}`], ['Terrain / navigation build', `${stats.terrainGenerationMs.toFixed(1)} / ${stats.navigationBuildMs.toFixed(1)} ms`],
+      ['Navigation nodes / pending', `${stats.navigationExpansions} / ${stats.navigationPending}`],
+      ['Render scale / lost sim time', `${Math.round(stats.renderScale * 100)}% / ${stats.droppedSimulationSeconds.toFixed(2)}s`],
+      ['Blocked > 2 seconds', `${stats.blockedUnits}`],
     ];
     $('#metrics').innerHTML = entries.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
   }
@@ -185,11 +212,34 @@ $('#zoom-out').addEventListener('click', () => renderer.zoom(1 / 1.2));
 $('#diagnostics-toggle').addEventListener('click', () => toggleDiagnostics());
 $('#close-diagnostics').addEventListener('click', () => toggleDiagnostics(false));
 $('#quality').addEventListener('change', () => renderer.setQuality($('#quality') instanceof HTMLSelectElement && $<HTMLSelectElement>('#quality').value === 'low' ? 'low' : 'balanced'));
+function startBenchmark(warmup = 300, duration = 600) {
+  if (!restart(500)) return false;
+  sim.hp.fill(1e8, 0, sim.used);
+  capture.start(terrainSeed, seed, sim.tuning, warmup, duration);
+  $('#benchmark-start').textContent = 'Stop benchmark'; return true;
+}
+function finishBenchmark() {
+  sim.weaponsEnabled = true;
+  for (let i = 0; i < sim.used; i++) sim.hp[i] = Math.min(sim.hp[i], sim.tuning.health);
+  $('#benchmark-start').textContent = 'Benchmark 500 vs 500 · 15 min';
+  $<HTMLButtonElement>('#benchmark-save').disabled = !capture.report;
+}
+function stopBenchmark(reason?: string) { if (capture.active) { capture.cancel(reason); finishBenchmark(); } }
+$('#benchmark-start').addEventListener('click', () => {
+  if (capture.active) stopBenchmark();
+  else startBenchmark();
+});
+$('#benchmark-save').addEventListener('click', () => {
+  if (!capture.report) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(capture.report, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a'); link.href = url; link.download = `pluto-1000-${terrainSeed}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 $('#apply-battle').addEventListener('click', () => {
   const count = Number($<HTMLSelectElement>('#deployment').value);
   if (Number.isFinite(count)) restart(count);
 });
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
+  stopBenchmark('Benchmark stopped: tuning changed.');
   tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentPanel?.updateCount(tuning.count); equipmentPanel?.updateRifle(sim.rifle); updateHud();
 }, () => restart());
 equipmentPanel = new EquipmentPanel($('#battle-app'), equipment, tuning.count, values => {
@@ -212,6 +262,7 @@ document.addEventListener('keydown', event => {
   if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); equipmentPanel.toggle(false); }
 });
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopBenchmark('Benchmark stopped: page hidden.');
   hidden = document.hidden; previousTime = 0; accumulator = 0;
   if (hidden) audio.stop();
 });
@@ -223,16 +274,23 @@ function frame(now: number) {
   lastElapsed = elapsed * 1000;
   if (elapsed > 0 && elapsed < 1) { intervals[intervalCursor++ % intervals.length] = elapsed * 1000; intervalCount = Math.min(intervalCount + 1, intervals.length); frames++; if (elapsed > 0.0334) slowFrames++; }
   const start = performance.now();
+  if (capture.active) sim.weaponsEnabled = !capture.movementPhase;
   if (!paused && sim.result === 'running') {
+    droppedSimulationSeconds += Math.max(0, elapsed - 0.1);
     accumulator += Math.min(elapsed, 0.1);
     let steps = 0;
     while (accumulator >= CONFIG.step && steps < 4) { sim.step(); accumulator -= CONFIG.step; steps++; }
-    if (accumulator >= CONFIG.step) accumulator %= CONFIG.step;
+    if (accumulator >= CONFIG.step) { const remaining = accumulator % CONFIG.step; droppedSimulationSeconds += accumulator - remaining; accumulator = remaining; }
   } else if (!paused) endAge += Math.min(elapsed, 0.1);
   const afterSim = performance.now();
   audio.update(sim, !paused);
+  if (!paused) renderer.adapt(lastElapsed);
   renderer.update(sim, paused || sim.result !== 'running' ? 1 : accumulator / CONFIG.step, sim.time + endAge);
   simMs = simMs * 0.9 + (afterSim - start) * 0.1; renderMs = renderMs * 0.9 + (performance.now() - afterSim) * 0.1;
+  if (capture.active) {
+    capture.sample(now, { simMs, renderMs, droppedSimulationSeconds, renderScale: renderer.resolutionScale, live: sim.alive[0] + sim.alive[1], simulationTick: sim.tick });
+    if (!capture.active) { finishBenchmark(); setPaused(true); }
+  }
   if (now - lastHudUpdate > 200) { updateHud(); lastHudUpdate = now; }
 }
 
@@ -241,6 +299,10 @@ const api = {
   ready: true,
   get sim() { return sim; }, renderer, audio,
   get paused() { return paused; }, setPaused, restart,
+  get terrainSeed() { return terrainSeed; },
+  replay() { tuning = { ...sim.tuning }; return restart(undefined, seed, terrainSeed); },
+  startBenchmark,
+  get benchmark() { return { active: capture.active, report: capture.report }; },
   get tuning() { return { ...tuning }; },
   get equipment() { return copyEquipment(equipment); },
   setEquipment(values: EquipmentSettings) {

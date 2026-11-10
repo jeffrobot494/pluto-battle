@@ -1,6 +1,10 @@
 import { CONFIG, NO_WEAPON, WEAPONS } from './config.ts';
 import { DEFAULT_TUNING, TUNING, deploymentError, type TuningValues } from './tuning.ts';
 import { ARMY_ITEMS, copyEquipment, defaultEquipment, recipientCount, validateEquipment, type EquipmentSettings } from './equipment.ts';
+import { random } from './random.ts';
+import { Terrain } from './terrain.ts';
+import { Navigation } from './navigation.ts';
+export { random } from './random.ts';
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
@@ -8,15 +12,23 @@ export type Command =
   | { type: 'spawn'; team: Team; x: number; z: number; weapon?: number }
   | { type: 'equip'; ids: readonly number[]; weapon: number };
 
-export function random(seed: number) {
-  let state = seed >>> 0;
-  return () => {
-    state += 0x6d2b79f5;
-    let t = state;
-    t = Math.imul(t ^ t >>> 15, t | 1);
-    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
+/** First 3D ray/capsule contact. Capsules stand upright on their support surface. */
+export function rayCapsule(x: number, y: number, z: number, dx: number, dy: number, dz: number, cx: number, base: number, cz: number, radius: number) {
+  const ox = x - cx, oz = z - cz, a = dx * dx + dz * dz, b = ox * dx + oz * dz;
+  const lower = base + radius, upper = base + CONFIG.soldier.height - radius;
+  const oy = y - Math.max(lower, Math.min(upper, y));
+  if (ox * ox + oy * oy + oz * oz <= radius * radius) return 0;
+  let result = Infinity;
+  if (a > 1e-10) {
+    const disc = b * b - a * (ox * ox + oz * oz - radius * radius);
+    if (disc >= 0) { const t = (-b - Math.sqrt(disc)) / a, h = y + dy * t - base; if (t >= 0 && h >= radius && h <= CONFIG.soldier.height - radius) result = t; }
+  }
+  for (let end = 0; end < 2; end++) {
+    const oy = y - base - (end ? CONFIG.soldier.height - radius : radius), dot = ox * dx + oy * dy + oz * dz;
+    const disc = dot * dot - (ox * ox + oy * oy + oz * oz - radius * radius);
+    if (disc >= 0) { const t = -dot - Math.sqrt(disc); if (t >= 0) result = Math.min(result, t); }
+  }
+  return result;
 }
 
 /** First distance along a unit direction to a circle. */
@@ -24,6 +36,7 @@ export function rayCircle(x: number, z: number, dx: number, dz: number, cx: numb
   const ox = x - cx, oz = z - cz, b = ox * dx + oz * dz;
   const c = ox * ox + oz * oz - radius * radius;
   if (c <= 0) return 0;
+  if (b >= 0) return Infinity;
   const d = b * b - c;
   if (d < 0) return Infinity;
   const t = -b - Math.sqrt(d);
@@ -41,19 +54,24 @@ export class SpatialGrid {
   readonly next: Int32Array;
   readonly previous: Int32Array;
   readonly cell: Int32Array;
-  constructor(capacity: number, halfWidth: number = CONFIG.field.halfWidth, halfDepth: number = CONFIG.field.halfDepth) {
+  readonly teamCounts: Uint16Array[];
+  private readonly teams: Uint8Array;
+  constructor(capacity: number, halfWidth: number = CONFIG.field.halfWidth, halfDepth: number = CONFIG.field.halfDepth, teams?: Uint8Array) {
     this.halfWidth = halfWidth; this.halfDepth = halfDepth;
     this.columns = Math.ceil(halfWidth * 2 / this.cellSize); this.rows = Math.ceil(halfDepth * 2 / this.cellSize);
     this.heads = new Int32Array(this.columns * this.rows).fill(-1);
     this.next = new Int32Array(capacity).fill(-1);
     this.previous = new Int32Array(capacity).fill(-1);
     this.cell = new Int32Array(capacity).fill(-1);
+    this.teams = teams ?? new Uint8Array(capacity);
+    this.teamCounts = [new Uint16Array(this.heads.length), new Uint16Array(this.heads.length)];
   }
   column(x: number) { return Math.max(0, Math.min(this.columns - 1, Math.floor((x + this.halfWidth) / this.cellSize))); }
   row(z: number) { return Math.max(0, Math.min(this.rows - 1, Math.floor((z + this.halfDepth) / this.cellSize))); }
   remove(slot: number) {
     const cell = this.cell[slot];
     if (cell < 0) return;
+    this.teamCounts[this.teams[slot]][cell]--;
     const p = this.previous[slot], n = this.next[slot];
     if (p < 0) this.heads[cell] = n; else this.next[p] = n;
     if (n >= 0) this.previous[n] = p;
@@ -67,6 +85,7 @@ export class SpatialGrid {
     this.next[slot] = first; this.previous[slot] = -1;
     if (first >= 0) this.previous[first] = slot;
     this.heads[cell] = slot; this.cell[slot] = cell;
+    this.teamCounts[this.teams[slot]][cell]++;
   }
 }
 
@@ -75,16 +94,18 @@ export class ShotEvents {
   readonly capacity = CONFIG.maxEffects;
   readonly x = new Float32Array(this.capacity);
   readonly z = new Float32Array(this.capacity);
+  readonly y = new Float32Array(this.capacity);
   readonly endX = new Float32Array(this.capacity);
   readonly endZ = new Float32Array(this.capacity);
+  readonly endY = new Float32Array(this.capacity);
   readonly team = new Uint8Array(this.capacity);
   readonly weapon = new Uint8Array(this.capacity);
   readonly at = new Float64Array(this.capacity).fill(-Infinity);
   cursor = 0;
-  emit(x: number, z: number, endX: number, endZ: number, team: Team, at: number, weapon = 0) {
+  emit(x: number, z: number, endX: number, endZ: number, team: Team, at: number, y = 0.7, endY = y, weapon = 0) {
     const i = this.cursor++ % this.capacity;
     this.x[i] = x; this.z[i] = z; this.endX[i] = endX; this.endZ[i] = endZ; this.team[i] = team; this.at[i] = at;
-    this.weapon[i] = weapon;
+    this.y[i] = y; this.endY[i] = endY; this.weapon[i] = weapon;
   }
 }
 
@@ -108,6 +129,22 @@ export class BattleSimulation {
   readonly capacity: number;
   readonly x: Float64Array;
   readonly z: Float64Array;
+  readonly y: Float64Array;
+  readonly previousY: Float64Array;
+  readonly aimPitch: Float32Array;
+  readonly visible: Uint8Array;
+  readonly terrain: Terrain;
+  readonly navigation: Navigation | null;
+  private readonly goals: Int32Array[];
+  private readonly goalCounts = new Uint16Array(2);
+  private readonly lastProgress: Float64Array;
+  private readonly beamStamp: Uint32Array;
+  private beamQuery = 0;
+  private readonly avoidanceX: Float64Array;
+  private readonly avoidanceZ: Float64Array;
+  private readonly nextRetarget: Float64Array;
+  private readonly detourCos = new Float64Array(6);
+  private readonly detourSin = new Float64Array(6);
   readonly previousX: Float64Array;
   readonly previousZ: Float64Array;
   readonly hp: Float32Array;
@@ -151,8 +188,11 @@ export class BattleSimulation {
   // Shared query scratch: all queries are synchronous.
   private nearestSlot = -1;
   private nearestDistance = Infinity;
+  private nearestVisible = false;
+  private readonly candidates = new Int32Array(4);
+  private readonly candidateDistances = new Float64Array(4);
 
-  constructor(perTeam = CONFIG.defaultPerTeam as number, seed = CONFIG.seed as number, capacity = CONFIG.capacity as number, tuning?: TuningValues, equipment: EquipmentSettings = defaultEquipment()) {
+  constructor(perTeam = CONFIG.defaultPerTeam as number, seed = CONFIG.seed as number, capacity = CONFIG.capacity as number, tuning?: TuningValues, terrain?: Terrain, navigation?: Navigation, equipment: EquipmentSettings = defaultEquipment()) {
     if (!validateEquipment(equipment)) throw new Error('Equipment percentages must be whole numbers from 0 to 100 for both armies.');
     this.equipment = copyEquipment(equipment);
     this.tuning = { ...DEFAULT_TUNING, ...tuning, count: perTeam, seed, columns: tuning?.columns ?? Math.max(1, Math.ceil(Math.sqrt(perTeam))) };
@@ -160,6 +200,13 @@ export class BattleSimulation {
     if (error) throw new Error(error);
     this.rifle = { ...WEAPONS[0], range: this.tuning.range, damage: this.tuning.damage, interval: this.tuning.fireInterval };
     this.capacity = capacity;
+    this.terrain = terrain ?? Terrain.flat(this.tuning.halfWidth, this.tuning.halfDepth);
+    this.navigation = terrain ? navigation ?? new Navigation(terrain, this.tuning.radius) : null;
+    this.y = new Float64Array(capacity); this.previousY = new Float64Array(capacity); this.aimPitch = new Float32Array(capacity); this.visible = new Uint8Array(capacity);
+    this.goals = [new Int32Array(capacity), new Int32Array(capacity)]; this.lastProgress = new Float64Array(capacity);
+    this.beamStamp = new Uint32Array(capacity);
+    this.avoidanceX = new Float64Array(capacity); this.avoidanceZ = new Float64Array(capacity); this.nextRetarget = new Float64Array(capacity);
+    this.updateDetourAngles();
     this.x = new Float64Array(capacity); this.z = new Float64Array(capacity);
     this.previousX = new Float64Array(capacity); this.previousZ = new Float64Array(capacity);
     this.hp = new Float32Array(capacity); this.radius = new Float32Array(capacity);
@@ -171,7 +218,7 @@ export class BattleSimulation {
     this.nextFire = new Float64Array(capacity); this.nextSearch = new Float64Array(capacity);
     this.moving = new Uint8Array(capacity); this.pendingDamage = new Float32Array(capacity);
     this.detourSide = new Int8Array(capacity);
-    this.grid = new SpatialGrid(capacity, this.tuning.halfWidth, this.tuning.halfDepth); this.rng = random(seed);
+    this.grid = new SpatialGrid(capacity, this.tuning.halfWidth, this.tuning.halfDepth, this.team); this.rng = random(seed);
     // A separate stream preserves deployment/fire randomness. Handedness has no
     // relationship to unit IDs, team, column parity, or storage order.
     this.steeringRng = random(seed ^ 0x51ed270b);
@@ -188,6 +235,14 @@ export class BattleSimulation {
   }
 
   weaponFor(index: number) { return index === 0 ? this.rifle : WEAPONS[index]; }
+  private updateDetourAngles() {
+    for (let i = 0; i < 6; i++) { const angle = (i < 2 ? this.tuning.shallowAngle : i < 4 ? this.tuning.wideAngle : Math.PI / 2) * (i % 2 ? -1 : 1); this.detourCos[i] = Math.cos(angle); this.detourSin[i] = Math.sin(angle); }
+  }
+  get blockedUnits() {
+    let count = 0;
+    for (let i = 0; i < this.used; i++) if (this.hp[i] > 0 && (!this.weaponsEnabled || !this.visible[i]) && this.time - this.lastProgress[i] > 2) count++;
+    return count;
+  }
 
   private assignEquipment(perTeam: number, seed: number) {
     this.inventory.fill(0, 0, this.used);
@@ -230,6 +285,7 @@ export class BattleSimulation {
   applyLiveTuning(values: TuningValues) {
     const oldHealth = this.tuning.health, oldInterval = this.rifle.interval;
     for (const def of TUNING) if (!def.restart) this.tuning[def.key] = values[def.key];
+    this.updateDetourAngles();
     this.rifle.range = this.tuning.range; this.rifle.damage = this.tuning.damage; this.rifle.interval = this.tuning.fireInterval;
     for (let i = 0; i < this.used; i++) if (this.hp[i] > 0) {
       if (oldHealth !== this.tuning.health) this.hp[i] = Math.min(this.tuning.health, this.hp[i] * this.tuning.health / oldHealth);
@@ -254,6 +310,8 @@ export class BattleSimulation {
     const id = this.nextId++;
     this.id[slot] = id; this.byId.set(id, slot);
     this.x[slot] = this.previousX[slot] = x; this.z[slot] = this.previousZ[slot] = z;
+    this.y[slot] = this.previousY[slot] = this.terrain.heightAt(x, z); this.visible[slot] = 0; this.aimPitch[slot] = 0; this.lastProgress[slot] = this.time;
+    this.avoidanceX[slot] = this.avoidanceZ[slot] = this.nextRetarget[slot] = 0;
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
     this.team[slot] = team; this.weapon[slot] = weapon; this.inventory[slot] = 1 << weapon; this.target[slot] = 0; this.moving[slot] = 0;
@@ -267,6 +325,7 @@ export class BattleSimulation {
   }
 
   clearPosition(ignore: number, x: number, z: number, radius: number): boolean {
+    if (this.navigation && !this.terrain.canStand(x, z, radius)) return false;
     // Current prototype supports a common infantry radius. Increase query reach when adding vehicles.
     const reach = radius + this.tuning.radius + 0.002;
     const minX = this.grid.column(x - reach), maxX = this.grid.column(x + reach);
@@ -286,29 +345,62 @@ export class BattleSimulation {
     if (Math.abs(x) > this.grid.halfWidth - r || Math.abs(z) > this.grid.halfDepth - r) return false;
     const ox = this.x[i], oz = this.z[i], dx = x - ox, dz = z - oz, length = Math.hypot(dx, dz);
     if (length < 1e-9) return false;
+    const ux = dx / length, uz = dz / length;
+    const midX = ox + dx * 0.5, midZ = oz + dz * 0.5, halfX = Math.abs(dx) * 0.5, halfZ = Math.abs(dz) * 0.5;
     const minX = this.grid.column(Math.min(ox, x) - r * 2 - 0.01), maxX = this.grid.column(Math.max(ox, x) + r * 2 + 0.01);
     const minZ = this.grid.row(Math.min(oz, z) - r * 2 - 0.01), maxZ = this.grid.row(Math.max(oz, z) + r * 2 + 0.01);
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
       for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
         if (j === i) continue;
-        if (rayCircle(ox, oz, dx / length, dz / length, this.x[j], this.z[j], r + this.radius[j] + 0.001) < length + 1e-9) return false;
+        const minimum = r + this.radius[j] + 0.001;
+        if (Math.abs(this.x[j] - midX) > minimum + halfX || Math.abs(this.z[j] - midZ) > minimum + halfZ) continue;
+        const jx = this.x[j] - ox, jz = this.z[j] - oz, along = Math.max(0, Math.min(length, jx * ux + jz * uz));
+        const cx = jx - ux * along, cz = jz - uz * along;
+        if (cx * cx + cz * cz < minimum * minimum - 1e-10) return false;
       }
     }
-    this.x[i] = x; this.z[i] = z; this.grid.insert(i, x, z);
+    if (this.navigation && !this.terrain.canTraverse(ox, oz, x, z, r)) return false;
+    let groundY = this.terrain.heightAt(x, z);
+    if (this.navigation) {
+      const maximumTravel = this.tuning.speed * CONFIG.step;
+      let shortened = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const travel = Math.hypot(x - ox, z - oz, groundY - this.y[i]);
+        if (travel <= maximumTravel + 1e-8) break;
+        const ratio = maximumTravel / travel * 0.999999;
+        x = ox + (x - ox) * ratio; z = oz + (z - oz) * ratio; groundY = this.terrain.heightAt(x, z);
+        shortened = true;
+      }
+      if (Math.hypot(x - ox, z - oz, groundY - this.y[i]) > maximumTravel + 1e-7) return false;
+      if (shortened && !this.terrain.canTraverse(ox, oz, x, z, r)) return false;
+    }
+    this.x[i] = x; this.z[i] = z; this.y[i] = groundY; this.grid.insert(i, x, z); this.lastProgress[i] = this.time;
     return true;
   }
 
   private nearest(i: number, radius: number): number {
     this.nearestSlot = -1; this.nearestDistance = radius * radius;
+    this.nearestVisible = false; this.candidates.fill(-1); this.candidateDistances.fill(radius * radius);
     const x = this.x[i], z = this.z[i];
     const minX = this.grid.column(x - radius), maxX = this.grid.column(x + radius);
     const minZ = this.grid.row(z - radius), maxZ = this.grid.row(z + radius);
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
+      if (!this.grid.teamCounts[1 - this.team[i]][cz * this.grid.columns + cx]) continue;
       for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
         if (this.team[j] === this.team[i]) continue;
-        const dx = this.x[j] - x, dz = this.z[j] - z, d = dx * dx + dz * dz;
+        const dx = this.x[j] - x, dz = this.z[j] - z, dy = this.y[j] - this.y[i], d = dx * dx + dz * dz + dy * dy;
         if (d < this.nearestDistance) { this.nearestDistance = d; this.nearestSlot = j; }
+        if (this.navigation && d < this.candidateDistances[3]) {
+          let at = 3;
+          while (at > 0 && d < this.candidateDistances[at - 1]) { this.candidateDistances[at] = this.candidateDistances[at - 1]; this.candidates[at] = this.candidates[at - 1]; at--; }
+          this.candidateDistances[at] = d; this.candidates[at] = j;
+        }
       }
+    }
+    if (this.navigation) for (let n = 0; n < 4; n++) {
+      const j = this.candidates[n];
+      if (j >= 0 && this.candidateDistances[n] <= this.weaponFor(this.weapon[i]).range ** 2
+        && this.terrain.visible(x, this.y[i] + 0.7, z, this.x[j], this.y[j] + 0.7, this.z[j])) { this.nearestVisible = true; return j; }
     }
     return this.nearestSlot;
   }
@@ -326,11 +418,19 @@ export class BattleSimulation {
   }
 
   private fire(i: number, target: number) {
-    const gun = this.weaponFor(this.weapon[i]), x = this.x[i], z = this.z[i];
-    const distance = Math.hypot(this.x[target] - x, this.z[target] - z);
-    if (distance > gun.range || distance < 1e-8) return;
-    const dx = (this.x[target] - x) / distance, dz = (this.z[target] - z) / distance;
-    let hit = -1, closest = gun.range;
+    const gun = this.weaponFor(this.weapon[i]), x = this.x[i], z = this.z[i], y = this.y[i] + 0.7;
+    const distance = Math.hypot(this.x[target] - x, this.z[target] - z, this.y[target] - this.y[i]);
+    if (distance > gun.range || distance < 1e-8) return false;
+    const dx = (this.x[target] - x) / distance, dz = (this.z[target] - z) / distance, dy = (this.y[target] - this.y[i]) / distance;
+    // Cached sight only guides movement. A fresh terrain ray authorizes each shot.
+    const terrainHit = this.terrain.raycast(x, y, z, dx, dy, dz, distance);
+    if (terrainHit < distance - 1e-5) {
+      this.visible[i] = 0;
+      this.nextSearch[i] = Math.min(this.nextSearch[i], this.time);
+      return false;
+    }
+    let hit = -1, closest = distance;
+    if (++this.beamQuery === 0xffffffff) { this.beamStamp.fill(0); this.beamQuery = 1; }
     // Traverse just the cells crossed by the beam. Neighboring cells account for circle radius.
     let cx = this.grid.column(x), cz = this.grid.row(z);
     const sx = dx >= 0 ? 1 : -1, sz = dz >= 0 ? 1 : -1, cell = this.grid.cellSize;
@@ -342,9 +442,12 @@ export class BattleSimulation {
     while (t <= closest && cx >= 0 && cx < this.grid.columns && cz >= 0 && cz < this.grid.rows) {
       for (let row = Math.max(0, cz - 1); row <= Math.min(this.grid.rows - 1, cz + 1); row++) {
         for (let column = Math.max(0, cx - 1); column <= Math.min(this.grid.columns - 1, cx + 1); column++) {
+          if (!this.grid.teamCounts[1 - this.team[i]][row * this.grid.columns + column]) continue;
           for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
             if (this.team[j] === this.team[i]) continue;
-            const d = rayCircle(x, z, dx, dz, this.x[j], this.z[j], this.radius[j]);
+            if (this.beamStamp[j] === this.beamQuery) continue;
+            this.beamStamp[j] = this.beamQuery;
+            const d = rayCapsule(x, y, z, dx, dy, dz, this.x[j], this.y[j], this.z[j], this.radius[j]);
             if (d < closest) { closest = d; hit = j; }
           }
         }
@@ -354,17 +457,36 @@ export class BattleSimulation {
     if (hit >= 0) this.pendingDamage[hit] += gun.damage;
     this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
+    this.aimPitch[i] = Math.atan2(dy, Math.hypot(dx, dz));
     this.events.emit('shot', this.team[i] as Team, x, this.time, this.weapon[i]);
-    this.shots.emit(x + dx * 0.44, z + dz * 0.44, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, this.weapon[i]);
+    const muzzle = Math.min(0.44, closest);
+    this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * closest, this.weapon[i]);
+    return true;
+  }
+
+  private updateNavigation() {
+    const nav = this.navigation; if (!nav) return;
+    if (this.tick === 1 || this.tick % 60 === 0) {
+      this.goalCounts.fill(0);
+      for (let i = 0; i < this.used; i++) if (this.hp[i] > 0) {
+        const team = 1 - this.team[i], cell = this.terrain.cell(this.x[i], this.z[i]);
+        const node = nav.walkable[cell] ? cell : nav.nodeAt(this.x[i], this.z[i]);
+        if (node >= 0) this.goals[team][this.goalCounts[team]++] = node;
+      }
+      for (let team = 0; team < 2; team++) nav.beginField(team, this.goals[team], this.goalCounts[team]);
+    }
+    nav.advance(1024);
   }
 
   step() {
     this.applyCommands();
     if (this.result !== 'running') return;
     this.time += CONFIG.step; this.tick++;
+    this.updateNavigation();
     this.centerX.fill(0); this.centerZ.fill(0);
     for (let i = 0; i < this.used; i++) {
       this.previousX[i] = this.x[i]; this.previousZ[i] = this.z[i]; this.moving[i] = 0;
+      this.previousY[i] = this.y[i];
       if (this.hp[i] > 0) { this.centerX[this.team[i]] += this.x[i]; this.centerZ[this.team[i]] += this.z[i]; }
     }
     for (let team = 0; team < 2; team++) if (this.alive[team]) { this.centerX[team] /= this.alive[team]; this.centerZ[team] /= this.alive[team]; }
@@ -374,36 +496,53 @@ export class BattleSimulation {
       if (this.hp[i] <= 0) continue;
       let target = this.byId.get(this.target[i]) ?? -1;
       const range = this.longestRange(i);
-      const distance = target >= 0 ? Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]) : Infinity;
+      const distance = target >= 0 ? Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) : Infinity;
       const valid = target >= 0 && this.hp[target] > 0 && this.team[target] !== this.team[i];
       const multipleWeapons = (this.inventory[i] & (this.inventory[i] - 1)) !== 0;
-      if (!valid || ((distance > range || multipleWeapons) && this.time >= this.nextSearch[i])) {
+      if (!valid || ((distance > range || multipleWeapons || this.navigation && !this.visible[i] && this.time >= this.nextRetarget[i]) && this.time >= this.nextSearch[i])) {
         if (this.time >= this.nextSearch[i] || this.target[i] !== 0) {
           target = this.nearest(i, range + this.tuning.searchPadding);
           this.target[i] = target >= 0 ? this.id[target] : 0;
           this.nextSearch[i] = this.time + this.tuning.searchInterval * (1 + (i % 5) * 0.05);
+          this.visible[i] = +(target >= 0 && (!this.navigation || this.nearestVisible));
+          this.nextRetarget[i] = this.time + Math.max(0.4, this.tuning.searchInterval * 4);
         } else target = -1;
+      } else if (this.navigation && this.time >= this.nextSearch[i]) {
+        this.visible[i] = +this.terrain.visible(this.x[i], this.y[i] + 0.7, this.z[i], this.x[target], this.y[target] + 0.7, this.z[target]);
+        this.nextSearch[i] = this.time + this.tuning.searchInterval * (1 + (i % 5) * 0.05);
       }
       const tx = target >= 0 ? this.x[target] : this.centerX[1 - this.team[i]];
       const tz = target >= 0 ? this.z[target] : this.centerZ[1 - this.team[i]];
       const dx = tx - this.x[i], dz = tz - this.z[i], d = Math.hypot(dx, dz);
-      this.weapon[i] = this.selectWeapon(i, d);
+      const reach = target >= 0 ? Math.hypot(d, this.y[target] - this.y[i]) : d;
+      this.weapon[i] = this.selectWeapon(i, reach);
       const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
-      if (this.weaponsEnabled && gunRange > 0 && target >= 0 && d <= gunRange - 0.12) continue;
+      const engage = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
+      if (this.weaponsEnabled && engage) continue;
       if (d < 0.001 || !this.alive[1 - this.team[i]]) continue;
-      const step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && gunRange > 0 && target >= 0 ? d - gunRange + 0.08 : d));
+      let step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && engage ? d - gunRange + 0.08 : d));
       if (step <= 0) continue;
       let vx = dx / d, vz = dz / d, separationX = 0, separationZ = 0;
-      const reach = this.tuning.avoidanceDistance, minX = this.grid.column(this.x[i] - reach), maxX = this.grid.column(this.x[i] + reach);
-      const minZ = this.grid.row(this.z[i] - reach), maxZ = this.grid.row(this.z[i] + reach);
-      for (let row = minZ; row <= maxZ; row++) for (let column = minX; column <= maxX; column++) {
-        for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
-          if (j === i) continue;
-          const ox = this.x[i] - this.x[j], oz = this.z[i] - this.z[j], dd = Math.hypot(ox, oz);
-          if (dd > 1e-6 && dd < reach) { const force = (reach - dd) / reach * this.tuning.avoidanceStrength; separationX += ox / dd * force; separationZ += oz / dd * force; }
-        }
+      if (this.navigation) {
+        if (this.navigation.direction(this.team[i], this.x[i], this.z[i])) {
+          const length = Math.hypot(this.navigation.directionX, this.navigation.directionZ);
+          vx = this.navigation.directionX / length; vz = this.navigation.directionZ / length;
+        } else if (!this.navigation.fields[this.team[i]].ready) continue;
       }
+      const refreshAvoidance = !this.navigation || (this.tick + i) % 2 === 0;
+      if (refreshAvoidance) {
+        const reach = this.tuning.avoidanceDistance, minX = this.grid.column(this.x[i] - reach), maxX = this.grid.column(this.x[i] + reach);
+        const minZ = this.grid.row(this.z[i] - reach), maxZ = this.grid.row(this.z[i] + reach);
+        for (let row = minZ; row <= maxZ; row++) for (let column = minX; column <= maxX; column++) {
+          for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
+            if (j === i) continue;
+            const ox = this.x[i] - this.x[j], oz = this.z[i] - this.z[j], dd = Math.hypot(ox, oz);
+            if (dd > 1e-6 && dd < reach) { const force = (reach - dd) / reach * this.tuning.avoidanceStrength; separationX += ox / dd * force; separationZ += oz / dd * force; }
+          }
+        }
+        this.avoidanceX[i] = separationX; this.avoidanceZ[i] = separationZ;
+      } else { separationX = this.avoidanceX[i]; separationZ = this.avoidanceZ[i]; }
       vx += separationX; vz += separationZ;
       const magnitude = Math.hypot(vx, vz); vx /= magnitude || 1; vz /= magnitude || 1;
       const ox = this.x[i], oz = this.z[i];
@@ -412,9 +551,7 @@ export class BattleSimulation {
         const side = this.detourSide[i];
         // Bounded alternatives let columns spill sideways without contact penetration.
         for (let attempt = 0; attempt < 6 && !moved; attempt++) {
-          const magnitude = attempt < 2 ? this.tuning.shallowAngle : attempt < 4 ? this.tuning.wideAngle : Math.PI / 2;
-          const angle = magnitude * (attempt % 2 ? -1 : 1) * side;
-          const c = Math.cos(angle), s = Math.sin(angle);
+          const c = this.detourCos[attempt], s = this.detourSin[attempt] * side;
           moved = this.safeMove(i, ox + (vx * c - vz * s) * step, oz + (vx * s + vz * c) * step);
         }
       }
@@ -425,16 +562,15 @@ export class BattleSimulation {
       if (this.hp[i] <= 0) continue;
       const target = this.byId.get(this.target[i]);
       // Re-evaluate after movement so the gun fired always matches the resolved range.
-      this.weapon[i] = this.selectWeapon(i, target === undefined ? Infinity : Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]));
+      this.weapon[i] = this.selectWeapon(i, target === undefined ? Infinity : Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]));
       if (this.weapon[i] === NO_WEAPON || this.nextFire[i] > this.time) continue;
       if (target !== undefined && this.hp[target] > 0 && this.team[target] !== this.team[i]
-        && Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]) <= this.weaponFor(this.weapon[i]).range) this.fire(i, target);
-      else {
-        // Preserve each rifle's firing phase while approaching. Otherwise every expired
-        // cooldown fires together at first contact, despite a staggered deployment.
-        const interval = this.weaponFor(this.weapon[i]).interval;
-        this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
-      }
+        && (!this.navigation || this.visible[i])
+        && Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) <= this.weaponFor(this.weapon[i]).range
+        && this.fire(i, target)) continue;
+      // Preserve firing phases while approaching or covered, without firing into walls.
+      const interval = this.weaponFor(this.weapon[i]).interval;
+      this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
     }
     for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) this.damage(this.id[i], this.pendingDamage[i]);
     if (!this.alive[0] || !this.alive[1]) this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids';
