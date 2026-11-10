@@ -8,7 +8,7 @@ const executablePath = process.env.BATTLE_CHROMIUM ?? (existsSync(candidate) ? c
 const browser = await chromium.launch({ executablePath, args: ['--use-angle=d3d11', '--force_high_performance_gpu'] });
 const errors = [];
 const changed = {
-  count: 64, health: 150, damage: 12, range: 12, fireInterval: 0.35, speed: 4, radius: 0.35,
+  gravity: 12, explosionRadius: 5, explosionDamage: 40, explosionImpulse: 15, count: 64, health: 150, damage: 12, range: 12, fireInterval: 0.35, speed: 4, radius: 0.35,
   halfWidth: 20, halfDepth: 30, frontline: 9, columns: 8, columnSpacing: 1.2, rowSpacing: 1.1,
   jitterX: 0.1, jitterZ: 0.1, seed: 1234, searchPadding: 6, searchInterval: 0.2, initialSearchDelay: 0.25,
   avoidanceDistance: 1.4, avoidanceStrength: 1.2, shallowAngle: 0.8, wideAngle: 1.4, flashDuration: 0.2, flashIntensity: 1.4,
@@ -18,11 +18,11 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message)); page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.goto(process.env.BATTLE_URL ?? 'http://localhost:5180/');
+  await page.goto(process.env.BATTLE_URL ?? 'http://localhost:5183/');
   await page.waitForFunction(() => window.__battle?.ready); await page.evaluate(() => window.__battle.setPaused(true));
   assert.equal(await page.locator('#tuning-panel').isVisible(), false);
   await page.click('#tuning-toggle'); assert.equal(await page.locator('#tuning-panel').isVisible(), true);
-  assert.equal(await page.locator('[data-tuning-key]').count(), 25);
+  assert.equal(await page.locator('[data-tuning-key]').count(), 29);
   const resources = await page.evaluate(() => ({ ...window.__battle.renderer.webgl.info.memory }));
   for (const [key, value] of Object.entries(changed)) {
     await page.locator(`[data-tuning-key="${key}"]`).fill(String(value));
@@ -65,9 +65,9 @@ try {
   await page.click('#tuning-toggle'); await page.click('#close-tuning');
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   const phone = await mobile.newPage(); phone.on('pageerror', error => errors.push(error.message));
-  await phone.goto(process.env.BATTLE_URL ?? 'http://localhost:5180/'); await phone.waitForFunction(() => window.__battle?.ready);
+  await phone.goto(process.env.BATTLE_URL ?? 'http://localhost:5183/'); await phone.waitForFunction(() => window.__battle?.ready);
   await phone.evaluate(() => window.__battle.setPaused(true)); await phone.tap('#tuning-toggle');
-  assert.equal(await phone.locator('[data-tuning-key]').count(), 25);
+  assert.equal(await phone.locator('[data-tuning-key]').count(), 29);
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await phone.locator('[data-tuning-key="damage"]').fill('20'); assert.equal(await phone.evaluate(() => window.__battle.sim.rifle.damage), 20);
   await phone.locator('.tuning-scroll').evaluate(element => { element.scrollTop = 0; });

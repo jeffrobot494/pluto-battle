@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright';
 
-const url = process.env.BATTLE_URL ?? 'http://localhost:5180/';
+const url = process.env.BATTLE_URL ?? 'http://localhost:5183/';
 const candidate = `${process.env.USERPROFILE}/AppData/Local/ms-playwright/chromium-1169/chrome-win/chrome.exe`;
 const executablePath = process.env.BATTLE_CHROMIUM ?? (existsSync(candidate) ? candidate : undefined);
 const software = process.env.BATTLE_SOFTWARE === '1';

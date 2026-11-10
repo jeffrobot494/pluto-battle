@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CONFIG, TEAM_COLORS } from './config.ts';
 import { BattleSimulation, random } from './simulation.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
+import type { GroundPoint } from './explosion-input.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
 const bodyColors = [new THREE.Color('#20242b'), new THREE.Color('#925b3b')];
@@ -23,6 +24,11 @@ export class BattleRenderer {
   readonly beamGlows: THREE.InstancedMesh;
   readonly sparks: THREE.InstancedMesh;
   readonly flashes: THREE.InstancedMesh;
+  readonly blastSpheres: THREE.InstancedMesh;
+  readonly blastSparks: THREE.InstancedMesh;
+  readonly blastTimes: THREE.InstancedBufferAttribute;
+  readonly blastPreview: THREE.Mesh;
+  activeExplosions = 0;
   readonly hitAttribute: THREE.InstancedBufferAttribute;
   readonly uniforms = { time: { value: 0 }, duration: { value: Number(CONFIG.hit.duration) }, intensity: { value: Number(CONFIG.hit.intensity) } };
   readonly resizeObserver: ResizeObserver;
@@ -39,6 +45,10 @@ export class BattleRenderer {
   private worldHalfWidth: number;
   private worldHalfDepth: number;
   private bodyRadius: number;
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2();
+  private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  private readonly groundPoint = new THREE.Vector3();
 
   constructor(readonly host: HTMLElement, initial: TuningValues = DEFAULT_TUNING) {
     this.worldHalfWidth = initial.halfWidth; this.worldHalfDepth = initial.halfDepth; this.bodyRadius = initial.radius;
@@ -89,6 +99,23 @@ export class BattleRenderer {
     this.sparks = this.instances(beamGeometry, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9, depthWrite: false, toneMapped: false }), CONFIG.maxEffects * 3);
     this.flashes = this.instances(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), CONFIG.maxEffects);
     this.beams.renderOrder = this.beamGlows.renderOrder = this.flashes.renderOrder = 2;
+    const blastGeometry = new THREE.IcosahedronGeometry(1, 1);
+    this.blastTimes = new THREE.InstancedBufferAttribute(new Float32Array(CONFIG.explosion.effects), 1);
+    this.blastTimes.setUsage(THREE.DynamicDrawUsage); blastGeometry.setAttribute('aBlastAt', this.blastTimes);
+    const blastMaterial = new THREE.MeshBasicMaterial({ color: '#ffd184', transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+    blastMaterial.onBeforeCompile = shader => {
+      shader.uniforms.uBattleTime = this.uniforms.time;
+      shader.vertexShader = 'attribute float aBlastAt; varying float vBlastAt;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvBlastAt = aBlastAt;');
+      shader.fragmentShader = 'uniform float uBattleTime; varying float vBlastAt;\n' + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>\ndiffuseColor.a *= pow(clamp(1.0 - (uBattleTime - vBlastAt) / ${CONFIG.explosion.duration}, 0.0, 1.0), 2.0);`);
+    };
+    blastMaterial.customProgramCacheKey = () => 'pluto-blast-v1';
+    this.blastSpheres = this.instances(blastGeometry, blastMaterial, CONFIG.explosion.effects);
+    this.blastSparks = this.instances(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: '#ffb058', toneMapped: false }), CONFIG.explosion.effects * 8);
+    this.blastSpheres.renderOrder = 3;
+    this.blastPreview = new THREE.Mesh(new THREE.RingGeometry(0.98, 1, 64), new THREE.MeshBasicMaterial({ color: '#ffd184', transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }));
+    this.blastPreview.rotation.x = -Math.PI / 2; this.blastPreview.visible = false; this.scene.add(this.blastPreview);
     this.buildWorld();
     this.controls = new OrbitControls(this.camera, this.webgl.domElement);
     this.controls.enableDamping = true; this.controls.dampingFactor = 0.12;
@@ -199,6 +226,18 @@ export class BattleRenderer {
     this.camera.position.copy(this.controls.target).add(this.cameraOffset); this.controls.update();
   }
   project(x: number, y: number, z: number) { return new THREE.Vector3(x, y, z).project(this.camera); }
+  pickGround(clientX: number, clientY: number, sim: BattleSimulation): GroundPoint | null {
+    const rect = this.webgl.domElement.getBoundingClientRect();
+    this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, 1 - (clientY - rect.top) / rect.height * 2);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    if (!this.raycaster.ray.intersectPlane(this.groundPlane, this.groundPoint)) return null;
+    const { x, z } = this.groundPoint;
+    return Math.abs(x) <= sim.grid.halfWidth && Math.abs(z) <= sim.grid.halfDepth ? { x, y: sim.ground.heightAt(x, z), z } : null;
+  }
+  setExplosionPreview(point: GroundPoint | null, radius: number) {
+    this.blastPreview.visible = !!point;
+    if (point) { this.blastPreview.position.set(point.x, point.y + 0.025, point.z); this.blastPreview.scale.setScalar(radius); }
+  }
   resize() {
     this.width = Math.max(1, this.host.clientWidth); this.height = Math.max(1, this.host.clientHeight);
     const aspect = this.width / this.height;
@@ -232,22 +271,24 @@ export class BattleRenderer {
     for (let i = 0; i < sim.used; i++) {
       const dead = sim.hp[i] <= 0, age = dead ? visualTime - sim.diedAt[i] : 0;
       if (dead && age >= CONFIG.corpseLifetime) continue;
-      const x = THREE.MathUtils.lerp(sim.previousX[i], sim.x[i], alpha), z = THREE.MathUtils.lerp(sim.previousZ[i], sim.z[i], alpha);
+      const x = THREE.MathUtils.lerp(sim.previousX[i], sim.x[i], alpha), y = THREE.MathUtils.lerp(sim.previousY[i], sim.y[i], alpha), z = THREE.MathUtils.lerp(sim.previousZ[i], sim.z[i], alpha);
       const yaw = sim.facing[i], fall = dead ? Math.min(1, age / 0.32) : 0;
       const fade = dead ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
-      const bob = !dead && sim.moving[i] ? Math.sin(sim.time * 17 + i * 3.7) * 0.025 : 0;
-      this.dummy.position.set(x, CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
+      const bob = !dead && sim.grounded[i] && sim.moving[i] ? Math.sin(sim.time * 17 + i * 3.7) * 0.025 : 0;
+      this.dummy.position.set(x, y + CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
       this.dummy.rotation.set(fall * Math.PI / 2, yaw, 0, 'YXZ'); this.dummy.scale.setScalar(fade);
       this.dummy.updateMatrix(); this.bodies.setMatrixAt(count, this.dummy.matrix); this.bodies.setColorAt(count, bodyColors[sim.team[i]]);
       this.hitAttribute.setX(count, Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000);
 
       this.baseRotation.setFromEuler(this.dummy.rotation);
       const size = sim.radius[i] / CONFIG.soldier.radius;
-      this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
-      this.dummy.quaternion.copy(this.baseRotation); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
-      this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
+      this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, y + 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
+      this.dummy.rotation.set(dead ? fall * Math.PI / 2 : sim.aimPitch[i], yaw, 0, 'YXZ'); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
+      this.dummy.quaternion.copy(this.baseRotation);
+      this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], y + 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
       this.dummy.updateMatrix(); this.visors.setMatrixAt(count, this.dummy.matrix); this.visors.setColorAt(count, teamColors[sim.team[i]]);
-      this.dummy.position.set(x + 0.11, 0.012, z + 0.08); this.dummy.rotation.set(-Math.PI / 2, 0, 0); this.dummy.scale.setScalar(fade * size);
+      const aboveGround = Math.max(0, y - sim.ground.heightAt(x, z));
+      this.dummy.position.set(x + 0.11, sim.ground.heightAt(x, z) + 0.012, z + 0.08); this.dummy.rotation.set(-Math.PI / 2, 0, 0); this.dummy.scale.setScalar(fade * size / (1 + aboveGround * 0.35));
       this.dummy.updateMatrix(); this.shadows.setMatrixAt(count, this.dummy.matrix);
       count++;
     }
@@ -260,28 +301,45 @@ export class BattleRenderer {
     const events = sim.shots;
     for (let i = 0; i < events.capacity; i++) {
       const age = visualTime - events.at[i]; if (age < 0 || age > 0.24) continue;
-      const dx = events.endX[i] - events.x[i], dz = events.endZ[i] - events.z[i], length = Math.hypot(dx, dz);
+      const dx = events.endX[i] - events.x[i], dy = events.endY[i] - events.y[i], dz = events.endZ[i] - events.z[i], length = Math.hypot(dx, dy, dz);
       const color = teamColors[events.team[i]];
       if (age < 0.075) {
-        this.dummy.position.set((events.x[i] + events.endX[i]) / 2, 0.7, (events.z[i] + events.endZ[i]) / 2);
-        this.dummy.rotation.set(0, Math.atan2(dx, dz), 0); this.dummy.scale.set(0.055, 0.055, length); this.dummy.updateMatrix();
+        this.dummy.position.set((events.x[i] + events.endX[i]) / 2, (events.y[i] + events.endY[i]) / 2, (events.z[i] + events.endZ[i]) / 2);
+        this.dummy.rotation.set(-Math.atan2(dy, Math.hypot(dx, dz)), Math.atan2(dx, dz), 0, 'YXZ'); this.dummy.scale.set(0.055, 0.055, length); this.dummy.updateMatrix();
         this.beams.setMatrixAt(beams, this.dummy.matrix); this.beams.setColorAt(beams, this.fxColor.copy(color));
         this.dummy.scale.set(0.17, 0.17, length); this.dummy.updateMatrix(); this.beamGlows.setMatrixAt(beams, this.dummy.matrix); this.beamGlows.setColorAt(beams, color); beams++;
       }
       if (age < 0.07) {
-        this.dummy.position.set(events.x[i], 0.71, events.z[i]); this.dummy.rotation.set(0, age * 30 + i, Math.PI / 4);
+        this.dummy.position.set(events.x[i], events.y[i] + 0.01, events.z[i]); this.dummy.rotation.set(0, age * 30 + i, Math.PI / 4);
         this.dummy.scale.setScalar(0.13 * (1 - age / 0.07)); this.dummy.updateMatrix(); this.flashes.setMatrixAt(flashes, this.dummy.matrix); this.flashes.setColorAt(flashes++, color);
       }
       if (this.quality !== 'low') for (let p = 0; p < 3; p++) {
         const angle = i * 2.399 + p * 2.094, speed = 1.8 + (i % 3) * 0.6;
-        this.dummy.position.set(events.endX[i] + Math.cos(angle) * age * speed, 0.7 + age * 2 - age * age * 10, events.endZ[i] + Math.sin(angle) * age * speed);
+        this.dummy.position.set(events.endX[i] + Math.cos(angle) * age * speed, events.endY[i] + age * 2 - age * age * 10, events.endZ[i] + Math.sin(angle) * age * speed);
         this.dummy.rotation.set(angle, angle, 0); this.dummy.scale.setScalar(0.045 * (1 - age / 0.24)); this.dummy.updateMatrix();
         this.sparks.setMatrixAt(sparks, this.dummy.matrix); this.sparks.setColorAt(sparks++, color);
       }
     }
     this.beams.count = this.beamGlows.count = beams; this.sparks.count = sparks; this.flashes.count = flashes;
     for (const mesh of [this.beams, this.beamGlows, this.sparks, this.flashes]) if (mesh.count > 0) this.upload(mesh);
-    this.activeEffects = beams + sparks + flashes;
+    let blasts = 0, debris = 0;
+    for (let i = 0; i < sim.explosions.capacity; i++) {
+      const e = sim.explosions, age = visualTime - e.at[i];
+      if (age < 0 || age >= CONFIG.explosion.duration) continue;
+      const progress = age / CONFIG.explosion.duration, radius = e.radius[i] * Math.min(1, 0.12 + progress * 3);
+      this.dummy.position.set(e.x[i], e.y[i], e.z[i]); this.dummy.rotation.set(0, i * 2.399, 0); this.dummy.scale.setScalar(radius);
+      this.dummy.updateMatrix(); this.blastSpheres.setMatrixAt(blasts, this.dummy.matrix); this.blastTimes.setX(blasts++, e.at[i]);
+      if (this.quality !== 'low') for (let p = 0; p < 8; p++) {
+        const angle = p * Math.PI / 4 + i * 2.399, reach = e.radius[i] * progress;
+        this.dummy.position.set(e.x[i] + Math.cos(angle) * reach, e.y[i] + Math.sin(p * 1.7) ** 2 * reach + 0.1, e.z[i] + Math.sin(angle) * reach);
+        this.dummy.rotation.set(angle, age * 8, angle); this.dummy.scale.setScalar(0.11 * (1 - progress));
+        this.dummy.updateMatrix(); this.blastSparks.setMatrixAt(debris++, this.dummy.matrix);
+      }
+    }
+    this.blastSpheres.count = blasts; this.blastSparks.count = debris; this.activeExplosions = blasts;
+    if (blasts) { this.blastTimes.clearUpdateRanges(); this.blastTimes.addUpdateRange(0, blasts); this.blastTimes.needsUpdate = true; this.upload(this.blastSpheres); }
+    if (debris) this.upload(this.blastSparks);
+    this.activeEffects = beams + sparks + flashes + blasts + debris;
     this.controls.update(); this.webgl.render(this.scene, this.camera);
   }
 
