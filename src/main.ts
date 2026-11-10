@@ -6,6 +6,8 @@ import { BattleRenderer } from './renderer.ts';
 import { loadTuning, saveTuning, deploymentError } from './tuning.ts';
 import { TuningPanel } from './tuning-panel.ts';
 import { BattleAudio, SOUND_EFFECTS } from './audio.ts';
+import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from './equipment.ts';
+import { EquipmentPanel } from './equipment-panel.ts';
 
 const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
@@ -58,6 +60,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 let tuning = loadTuning();
 let tuningPanel: TuningPanel;
+let equipment = loadEquipment();
+let equipmentPanel: EquipmentPanel;
 let renderer: BattleRenderer;
 try { renderer = new BattleRenderer($('#viewport'), tuning); }
 catch (error) { $('#error').hidden = false; $('#error').textContent = `The battlefield could not start. Enable WebGL and reload. ${error instanceof Error ? error.message : ''}`; throw error; }
@@ -83,10 +87,10 @@ const audioEvents = new AbortController();
 const unlockAudio = () => { if (!document.hidden) void audio.unlock(); };
 document.addEventListener('pointerdown', unlockAudio, { capture: true, signal: audioEvents.signal });
 document.addEventListener('keydown', unlockAudio, { capture: true, signal: audioEvents.signal });
-soundPanel.addEventListener('toggle', () => { if (soundPanel.open) { toggleDiagnostics(false); tuningPanel?.toggle(false); } });
+soundPanel.addEventListener('toggle', () => { if (soundPanel.open) { toggleDiagnostics(false); tuningPanel?.toggle(false); equipmentPanel?.toggle(false); } });
 
 let perTeam = tuning.count, seed = tuning.seed;
-let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning), paused = false, accumulator = 0, endAge = 0;
+let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, equipment), paused = false, accumulator = 0, endAge = 0;
 audio.reset(sim);
 let previousTime = 0, lastHudUpdate = -Infinity, hidden = document.hidden, frameHandle = 0;
 let simMs = 0, renderMs = 0, lastElapsed = 16.67, frames = 0, slowFrames = 0;
@@ -99,7 +103,7 @@ const stateLabel = $('#state-label'), outcome = $('#outcome'), pauseButton = $('
 function toggleDiagnostics(force?: boolean) {
   const open = force ?? $('#diagnostics').hidden; $('#diagnostics').hidden = !open;
   $('#diagnostics-toggle').setAttribute('aria-expanded', String(open));
-  if (open) { soundPanel.open = false; updateHud(); }
+  if (open) { soundPanel.open = false; tuningPanel?.toggle(false); equipmentPanel?.toggle(false); updateHud(); }
 }
 function setPaused(value: boolean) {
   paused = value; accumulator = 0;
@@ -109,16 +113,18 @@ function setPaused(value: boolean) {
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
 function restart(count?: number, nextSeed?: number) {
+  if (equipmentPanel && !equipmentPanel.valid) { tuningPanel.toggle(false); equipmentPanel.toggle(true); return false; }
   const candidate = { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
   tuning = candidate;
-  if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); tuningPanel.toggle(true); return false; }
+  if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); equipmentPanel.toggle(false); tuningPanel.toggle(true); return false; }
   perTeam = tuning.count; seed = tuning.seed;
-  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning); accumulator = 0; endAge = 0;
+  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, equipment); accumulator = 0; endAge = 0;
   audio.reset(sim);
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
   saveTuning(tuning); tuningPanel.sync(tuning, sim.tuning);
+  saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, perTeam);
   $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
   outcome.hidden = true; setPaused(false); updateHud();
   return true;
@@ -184,18 +190,26 @@ $('#apply-battle').addEventListener('click', () => {
   if (Number.isFinite(count)) restart(count);
 });
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
-  tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); updateHud();
+  tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentPanel?.updateCount(tuning.count); equipmentPanel?.updateRifle(sim.rifle); updateHud();
 }, () => restart());
-tuningPanel.toggleButton.addEventListener('click', () => { if (!tuningPanel.element.hidden) soundPanel.open = false; });
+equipmentPanel = new EquipmentPanel($('#battle-app'), equipment, tuning.count, values => {
+  equipment = values; saveEquipment(equipment);
+}, () => restart());
+equipmentPanel.updateRifle(sim.rifle);
+function openTuning() { tuningPanel.toggle(); if (!tuningPanel.element.hidden) { soundPanel.open = false; equipmentPanel.toggle(false); toggleDiagnostics(false); } }
+function openEquipment() { equipmentPanel.toggle(); if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } }
+tuningPanel.toggleButton.addEventListener('click', () => { if (!tuningPanel.element.hidden) { soundPanel.open = false; equipmentPanel.toggle(false); toggleDiagnostics(false); } });
+equipmentPanel.toggleButton.addEventListener('click', () => { if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } });
 $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
 document.addEventListener('keydown', event => {
   if (event.target instanceof Element && event.target.closest('input, select, button, summary')) return;
   if (event.code === 'Space') { event.preventDefault(); setPaused(!paused); }
   if (event.code === 'KeyR') restart();
   if (event.code === 'KeyD') toggleDiagnostics();
-  if (event.code === 'KeyT') { tuningPanel.toggle(); if (!tuningPanel.element.hidden) soundPanel.open = false; }
+  if (event.code === 'KeyT') openTuning();
+  if (event.code === 'KeyE') openEquipment();
   if (event.code === 'KeyC') renderer.resetCamera();
-  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); }
+  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); equipmentPanel.toggle(false); }
 });
 document.addEventListener('visibilitychange', () => {
   hidden = document.hidden; previousTime = 0; accumulator = 0;
@@ -228,6 +242,11 @@ const api = {
   get sim() { return sim; }, renderer, audio,
   get paused() { return paused; }, setPaused, restart,
   get tuning() { return { ...tuning }; },
+  get equipment() { return copyEquipment(equipment); },
+  setEquipment(values: EquipmentSettings) {
+    if (!validateEquipment(values)) return false;
+    equipment = copyEquipment(values); saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, tuning.count); return true;
+  },
   performance: performanceSnapshot,
   get timings() { return { simMs, renderMs }; },
   step(count = 1) {

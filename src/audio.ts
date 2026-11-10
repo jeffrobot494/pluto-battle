@@ -1,7 +1,8 @@
 import type { BattleSimulation } from './simulation.ts';
+import { WEAPON_ID } from './config.ts';
 
 export const SOUND_EFFECTS = [
-  { id: 'laser', label: 'Laser gun firing', volume: 30, duration: 0.18, interval: 0.045 },
+  { id: 'laser', label: 'Weapon firing', volume: 30, duration: 0.18, interval: 0.045 },
   { id: 'plutonianHit', label: 'Plutonian hit', volume: 55, duration: 0.24, interval: 0.075 },
   { id: 'sectoidHit', label: 'Sectoid hit', volume: 55, duration: 0.27, interval: 0.075 },
   { id: 'plutonianDeath', label: 'Plutonian dying', volume: 70, duration: 0.65, interval: 0.12 },
@@ -138,11 +139,12 @@ export class BattleAudio {
       const id: SoundId = kind === 'shot' ? 'laser'
         : events.team[i] === 0 ? kind === 'death' ? 'plutonianDeath' : 'plutonianHit'
           : kind === 'death' ? 'sectoidDeath' : 'sectoidHit';
-      this.play(id, Math.max(-0.75, Math.min(0.75, events.x[i] / sim.grid.halfWidth)));
+      const rate = kind !== 'shot' ? 1 : events.weapon[i] === WEAPON_ID.sniper ? 0.65 : events.weapon[i] === WEAPON_ID.shotgun ? 0.42 : 1;
+      this.play(id, Math.max(-0.75, Math.min(0.75, events.x[i] / sim.grid.halfWidth)), false, rate);
     }
   }
 
-  private play(id: SoundId, position: number, preview = false) {
+  private play(id: SoundId, position: number, preview = false, rate = 1) {
     const context = this.context;
     if (this.disposed || document.hidden || !context || context.state !== 'running' || this.volumes[id] === 0) return;
     const now = context.currentTime;
@@ -151,7 +153,7 @@ export class BattleAudio {
     if (this.voices.size >= 24) return;
     const source = context.createBufferSource(), gain = context.createGain(), pan = context.createStereoPanner();
     source.buffer = this.buffers.get(id)!;
-    source.playbackRate.value = preview ? 1 : 0.94 + Math.random() * 0.12;
+    source.playbackRate.value = preview ? 1 : rate * (0.94 + Math.random() * 0.12);
     gain.gain.value = 0.48; pan.pan.value = position;
     source.connect(gain); gain.connect(pan); pan.connect(this.channels.get(id)!);
     const voice: Voice = { source, gain, pan, id }; this.voices.add(voice);

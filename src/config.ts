@@ -20,5 +20,9 @@ export const WEAPONS: readonly Weapon[] = [
   { name: 'Laser rifle', range: 10.5, damage: 9, interval: 0.46 },
   // Developer API fixture for live upgrades; no purchase/upgrade UI in this slice.
   { name: 'Heavy laser', range: 13, damage: 16, interval: 0.62 },
+  { name: 'Sniper rifle', range: 24, damage: 60, interval: 1.8 },
+  { name: 'Shotgun', range: 4, damage: 45, interval: 0.7 },
 ];
+export const WEAPON_ID = { rifle: 0, heavy: 1, sniper: 2, shotgun: 3 } as const;
+export const NO_WEAPON = 255;
 export const TEAM_COLORS = ['#75ff32', '#ff352b'] as const;

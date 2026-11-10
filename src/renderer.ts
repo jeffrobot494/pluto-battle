@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CONFIG, TEAM_COLORS } from './config.ts';
+import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID } from './config.ts';
 import { BattleSimulation, random } from './simulation.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
 
@@ -244,7 +244,12 @@ export class BattleRenderer {
       this.baseRotation.setFromEuler(this.dummy.rotation);
       const size = sim.radius[i] / CONFIG.soldier.radius;
       this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
+      const weapon = sim.weapon[i];
+      if (weapon === NO_WEAPON) this.dummy.scale.setScalar(0);
+      else if (weapon === WEAPON_ID.sniper) this.dummy.scale.set(fade * 0.8, fade * 0.85, fade * 1.7);
+      else if (weapon === WEAPON_ID.shotgun) this.dummy.scale.set(fade * 1.8, fade * 1.25, fade * 0.7);
       this.dummy.quaternion.copy(this.baseRotation); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
+      this.dummy.scale.setScalar(fade);
       this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
       this.dummy.updateMatrix(); this.visors.setMatrixAt(count, this.dummy.matrix); this.visors.setColorAt(count, teamColors[sim.team[i]]);
       this.dummy.position.set(x + 0.11, 0.012, z + 0.08); this.dummy.rotation.set(-Math.PI / 2, 0, 0); this.dummy.scale.setScalar(fade * size);
@@ -262,15 +267,17 @@ export class BattleRenderer {
       const age = visualTime - events.at[i]; if (age < 0 || age > 0.24) continue;
       const dx = events.endX[i] - events.x[i], dz = events.endZ[i] - events.z[i], length = Math.hypot(dx, dz);
       const color = teamColors[events.team[i]];
-      if (age < 0.075) {
+      const sniper = events.weapon[i] === WEAPON_ID.sniper, shotgun = events.weapon[i] === WEAPON_ID.shotgun;
+      const beamWidth = sniper ? 0.032 : shotgun ? 0.16 : 0.055, beamLife = sniper ? 0.12 : shotgun ? 0.045 : 0.075;
+      if (age < beamLife) {
         this.dummy.position.set((events.x[i] + events.endX[i]) / 2, 0.7, (events.z[i] + events.endZ[i]) / 2);
-        this.dummy.rotation.set(0, Math.atan2(dx, dz), 0); this.dummy.scale.set(0.055, 0.055, length); this.dummy.updateMatrix();
+        this.dummy.rotation.set(0, Math.atan2(dx, dz), 0); this.dummy.scale.set(beamWidth, beamWidth, length); this.dummy.updateMatrix();
         this.beams.setMatrixAt(beams, this.dummy.matrix); this.beams.setColorAt(beams, this.fxColor.copy(color));
-        this.dummy.scale.set(0.17, 0.17, length); this.dummy.updateMatrix(); this.beamGlows.setMatrixAt(beams, this.dummy.matrix); this.beamGlows.setColorAt(beams, color); beams++;
+        this.dummy.scale.set(beamWidth * 3, beamWidth * 3, length); this.dummy.updateMatrix(); this.beamGlows.setMatrixAt(beams, this.dummy.matrix); this.beamGlows.setColorAt(beams, color); beams++;
       }
       if (age < 0.07) {
         this.dummy.position.set(events.x[i], 0.71, events.z[i]); this.dummy.rotation.set(0, age * 30 + i, Math.PI / 4);
-        this.dummy.scale.setScalar(0.13 * (1 - age / 0.07)); this.dummy.updateMatrix(); this.flashes.setMatrixAt(flashes, this.dummy.matrix); this.flashes.setColorAt(flashes++, color);
+        this.dummy.scale.setScalar((shotgun ? 0.23 : sniper ? 0.16 : 0.13) * (1 - age / 0.07)); this.dummy.updateMatrix(); this.flashes.setMatrixAt(flashes, this.dummy.matrix); this.flashes.setColorAt(flashes++, color);
       }
       if (this.quality !== 'low') for (let p = 0; p < 3; p++) {
         const angle = i * 2.399 + p * 2.094, speed = 1.8 + (i % 3) * 0.6;

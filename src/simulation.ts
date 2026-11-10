@@ -1,5 +1,6 @@
-import { CONFIG, WEAPONS } from './config.ts';
+import { CONFIG, NO_WEAPON, WEAPONS } from './config.ts';
 import { DEFAULT_TUNING, TUNING, deploymentError, type TuningValues } from './tuning.ts';
+import { ARMY_ITEMS, copyEquipment, defaultEquipment, recipientCount, validateEquipment, type EquipmentSettings } from './equipment.ts';
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
@@ -77,11 +78,13 @@ export class ShotEvents {
   readonly endX = new Float32Array(this.capacity);
   readonly endZ = new Float32Array(this.capacity);
   readonly team = new Uint8Array(this.capacity);
+  readonly weapon = new Uint8Array(this.capacity);
   readonly at = new Float64Array(this.capacity).fill(-Infinity);
   cursor = 0;
-  emit(x: number, z: number, endX: number, endZ: number, team: Team, at: number) {
+  emit(x: number, z: number, endX: number, endZ: number, team: Team, at: number, weapon = 0) {
     const i = this.cursor++ % this.capacity;
     this.x[i] = x; this.z[i] = z; this.endX[i] = endX; this.endZ[i] = endZ; this.team[i] = team; this.at[i] = at;
+    this.weapon[i] = weapon;
   }
 }
 
@@ -90,12 +93,14 @@ export class CombatEvents {
   readonly capacity = 256;
   readonly kind: ('shot' | 'hit' | 'death')[] = new Array(this.capacity).fill('shot');
   readonly team = new Uint8Array(this.capacity);
+  readonly weapon = new Uint8Array(this.capacity);
   readonly x = new Float32Array(this.capacity);
   readonly at = new Float64Array(this.capacity);
   cursor = 0;
-  emit(kind: 'shot' | 'hit' | 'death', team: Team, x: number, at: number) {
+  emit(kind: 'shot' | 'hit' | 'death', team: Team, x: number, at: number, weapon = 0) {
     const i = this.cursor++ % this.capacity;
     this.kind[i] = kind; this.team[i] = team; this.x[i] = x; this.at[i] = at;
+    this.weapon[i] = weapon;
   }
 }
 
@@ -109,6 +114,8 @@ export class BattleSimulation {
   readonly radius: Float32Array;
   readonly team: Uint8Array;
   readonly weapon: Uint8Array;
+  readonly inventory: Uint32Array;
+  readonly equipment: EquipmentSettings;
   readonly id: Uint32Array;
   readonly target: Uint32Array;
   readonly facing: Float32Array;
@@ -145,7 +152,9 @@ export class BattleSimulation {
   private nearestSlot = -1;
   private nearestDistance = Infinity;
 
-  constructor(perTeam = CONFIG.defaultPerTeam as number, seed = CONFIG.seed as number, capacity = CONFIG.capacity as number, tuning?: TuningValues) {
+  constructor(perTeam = CONFIG.defaultPerTeam as number, seed = CONFIG.seed as number, capacity = CONFIG.capacity as number, tuning?: TuningValues, equipment: EquipmentSettings = defaultEquipment()) {
+    if (!validateEquipment(equipment)) throw new Error('Equipment percentages must be whole numbers from 0 to 100 for both armies.');
+    this.equipment = copyEquipment(equipment);
     this.tuning = { ...DEFAULT_TUNING, ...tuning, count: perTeam, seed, columns: tuning?.columns ?? Math.max(1, Math.ceil(Math.sqrt(perTeam))) };
     const error = perTeam === 0 ? null : deploymentError(this.tuning);
     if (error) throw new Error(error);
@@ -155,6 +164,7 @@ export class BattleSimulation {
     this.previousX = new Float64Array(capacity); this.previousZ = new Float64Array(capacity);
     this.hp = new Float32Array(capacity); this.radius = new Float32Array(capacity);
     this.team = new Uint8Array(capacity); this.weapon = new Uint8Array(capacity);
+    this.inventory = new Uint32Array(capacity);
     this.id = new Uint32Array(capacity); this.target = new Uint32Array(capacity);
     this.facing = new Float32Array(capacity); this.lastHit = new Float64Array(capacity).fill(-Infinity);
     this.lastFire = new Float64Array(capacity).fill(-Infinity); this.diedAt = new Float64Array(capacity).fill(-Infinity);
@@ -174,9 +184,48 @@ export class BattleSimulation {
       const z = sign * (this.tuning.frontline + row * this.tuning.rowSpacing + this.rng() * this.tuning.jitterZ);
       if (this.spawn(team as Team, x, z) === null) throw new Error('Invalid deployment.');
     }
+    this.assignEquipment(perTeam, seed);
   }
 
   weaponFor(index: number) { return index === 0 ? this.rifle : WEAPONS[index]; }
+
+  private assignEquipment(perTeam: number, seed: number) {
+    this.inventory.fill(0, 0, this.used);
+    for (const team of [0, 1] as const) for (const item of ARMY_ITEMS) {
+      // Independent streams avoid changing formation, fire phases, or another item's recipients.
+      const rng = random(seed ^ Math.imul(team + 1, 0x9e3779b9) ^ Math.imul(item.weapon + 1, 0x85ebca6b));
+      const slots = Array.from({ length: perTeam }, (_, n) => team * perTeam + n);
+      const count = recipientCount(perTeam, this.equipment[team][item.id]);
+      for (let n = 0; n < count; n++) {
+        const picked = n + Math.floor(rng() * (perTeam - n));
+        [slots[n], slots[picked]] = [slots[picked], slots[n]];
+        this.inventory[slots[n]] |= 1 << item.weapon;
+      }
+    }
+    for (let i = 0; i < this.used; i++) {
+      const weapon = this.selectWeapon(i, Infinity);
+      // Reuse the original staggered phase, scaled to the initial weapon's interval.
+      if (weapon !== NO_WEAPON) this.nextFire[i] *= this.weaponFor(weapon).interval / this.rifle.interval;
+      this.weapon[i] = weapon;
+    }
+  }
+
+  longestRange(i: number) {
+    let range = 0;
+    for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) range = Math.max(range, this.weaponFor(w).range);
+    return range;
+  }
+
+  /** Best DPS within reach; otherwise carry the longest-range weapon while approaching. */
+  selectWeapon(i: number, distance: number) {
+    let best = NO_WEAPON, longest = NO_WEAPON, score = -Infinity, range = -Infinity;
+    for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) {
+      const gun = this.weaponFor(w), dps = gun.damage / gun.interval;
+      if (gun.range > range) { range = gun.range; longest = w; }
+      if (distance <= gun.range && dps > score) { score = dps; best = w; }
+    }
+    return best === NO_WEAPON ? longest : best;
+  }
 
   applyLiveTuning(values: TuningValues) {
     const oldHealth = this.tuning.health, oldInterval = this.rifle.interval;
@@ -207,7 +256,7 @@ export class BattleSimulation {
     this.x[slot] = this.previousX[slot] = x; this.z[slot] = this.previousZ[slot] = z;
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
-    this.team[slot] = team; this.weapon[slot] = weapon; this.target[slot] = 0; this.moving[slot] = 0;
+    this.team[slot] = team; this.weapon[slot] = weapon; this.inventory[slot] = 1 << weapon; this.target[slot] = 0; this.moving[slot] = 0;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
     this.nextFire[slot] = this.time + this.rng() * this.weaponFor(weapon).interval;
@@ -305,8 +354,8 @@ export class BattleSimulation {
     if (hit >= 0) this.pendingDamage[hit] += gun.damage;
     this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
-    this.events.emit('shot', this.team[i] as Team, x, this.time);
-    this.shots.emit(x + dx * 0.44, z + dz * 0.44, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time);
+    this.events.emit('shot', this.team[i] as Team, x, this.time, this.weapon[i]);
+    this.shots.emit(x + dx * 0.44, z + dz * 0.44, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, this.weapon[i]);
   }
 
   step() {
@@ -324,12 +373,13 @@ export class BattleSimulation {
       const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
       if (this.hp[i] <= 0) continue;
       let target = this.byId.get(this.target[i]) ?? -1;
-      const gun = this.weaponFor(this.weapon[i]);
+      const range = this.longestRange(i);
       const distance = target >= 0 ? Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]) : Infinity;
       const valid = target >= 0 && this.hp[target] > 0 && this.team[target] !== this.team[i];
-      if (!valid || (distance > gun.range && this.time >= this.nextSearch[i])) {
+      const multipleWeapons = (this.inventory[i] & (this.inventory[i] - 1)) !== 0;
+      if (!valid || ((distance > range || multipleWeapons) && this.time >= this.nextSearch[i])) {
         if (this.time >= this.nextSearch[i] || this.target[i] !== 0) {
-          target = this.nearest(i, gun.range + this.tuning.searchPadding);
+          target = this.nearest(i, range + this.tuning.searchPadding);
           this.target[i] = target >= 0 ? this.id[target] : 0;
           this.nextSearch[i] = this.time + this.tuning.searchInterval * (1 + (i % 5) * 0.05);
         } else target = -1;
@@ -337,10 +387,12 @@ export class BattleSimulation {
       const tx = target >= 0 ? this.x[target] : this.centerX[1 - this.team[i]];
       const tz = target >= 0 ? this.z[target] : this.centerZ[1 - this.team[i]];
       const dx = tx - this.x[i], dz = tz - this.z[i], d = Math.hypot(dx, dz);
+      this.weapon[i] = this.selectWeapon(i, d);
+      const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
-      if (this.weaponsEnabled && target >= 0 && d <= gun.range - 0.12) continue;
+      if (this.weaponsEnabled && gunRange > 0 && target >= 0 && d <= gunRange - 0.12) continue;
       if (d < 0.001 || !this.alive[1 - this.team[i]]) continue;
-      const step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && target >= 0 ? d - gun.range + 0.08 : d));
+      const step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && gunRange > 0 && target >= 0 ? d - gunRange + 0.08 : d));
       if (step <= 0) continue;
       let vx = dx / d, vz = dz / d, separationX = 0, separationZ = 0;
       const reach = this.tuning.avoidanceDistance, minX = this.grid.column(this.x[i] - reach), maxX = this.grid.column(this.x[i] + reach);
@@ -370,8 +422,11 @@ export class BattleSimulation {
     }
     this.pendingDamage.fill(0, 0, this.used);
     if (this.weaponsEnabled) for (let i = 0; i < this.used; i++) {
-      if (this.hp[i] <= 0 || this.nextFire[i] > this.time) continue;
+      if (this.hp[i] <= 0) continue;
       const target = this.byId.get(this.target[i]);
+      // Re-evaluate after movement so the gun fired always matches the resolved range.
+      this.weapon[i] = this.selectWeapon(i, target === undefined ? Infinity : Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]));
+      if (this.weapon[i] === NO_WEAPON || this.nextFire[i] > this.time) continue;
       if (target !== undefined && this.hp[target] > 0 && this.team[target] !== this.team[i]
         && Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i]) <= this.weaponFor(this.weapon[i]).range) this.fire(i, target);
       else {
@@ -390,7 +445,7 @@ export class BattleSimulation {
       if (command.type === 'spawn') { if (this.spawn(command.team, command.x, command.z, command.weapon) === null) this.rejectedSpawns++; }
       else if (WEAPONS[command.weapon]) for (const id of command.ids) {
         const i = this.byId.get(id);
-        if (i !== undefined && this.hp[i] > 0) this.weapon[i] = command.weapon;
+        if (i !== undefined && this.hp[i] > 0) { this.inventory[i] = 1 << command.weapon; this.weapon[i] = command.weapon; }
       }
     }
     this.commands.length = 0;

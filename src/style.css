@@ -139,3 +139,34 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 }
 @media (prefers-reduced-motion: reduce) { .strength-track div { transition: none; } }
 @media (max-height: 640px) { #tuning-panel { top: 72px; bottom: 105px; }.tuning-heading { padding: 8px 15px; }.tuning-footer { padding: 8px 15px; }.tuning-footer p { min-height: 0; } }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.equipment-toggle { left: 175px; }
+#equipment-panel { position: absolute; left: 34px; top: 226px; bottom: 164px; width: 400px; max-width: calc(100% - 68px); display: flex; flex-direction: column; background: #201a28f5; border: 1px solid #ffffff30; border-radius: 6px; box-shadow: 0 15px 55px #100b1b44; overflow: hidden; z-index: 3; }
+.equipment-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 18px; scrollbar-width: thin; scrollbar-color: #65516f #241c2c; }
+.equipment-intro, .equipment-help { color: #b8a6c4; font-size: 11px; line-height: 1.6; margin: 15px 0; }
+.equipment-help { font-size: 10px; color: #9d8aa9; }
+.equipment-armies, .equipment-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+.equipment-armies { position: sticky; top: 0; z-index: 1; padding: 10px 0 12px; background: #201a28; border-bottom: 1px solid #ffffff20; font: 10px Consolas, monospace; letter-spacing: 0.06em; color: var(--green); }
+.equipment-armies span:last-child { color: var(--red); }
+.equipment-item { padding: 16px 0 13px; border-bottom: 1px solid #ffffff19; }
+.equipment-item h2 { margin: 0 0 13px; color: #eee4f2; font-size: 13px; font-weight: 600; }
+.equipment-item h2 > span { display: block; margin-top: 5px; color: #aa97b6; font: 9px Consolas, monospace; letter-spacing: 0.025em; }
+.equipment-percent { display: flex; align-items: center; gap: 8px; background: #302638; border: 1px solid #ffffff2a; border-radius: 3px; padding-right: 12px; color: #b8a6c4; font: 12px Consolas, monospace; }
+.equipment-percent input { min-width: 0; width: 100%; min-height: 40px; padding: 9px 10px; border: 0; background: transparent; color: #eee4f2; font: 14px Consolas, monospace; }
+.equipment-percent:has([aria-invalid="true"]) { border-color: var(--red); }
+.equipment-control.changed .equipment-percent { border-color: #c8a777; }
+.equipment-control input[type="range"] { display: block; width: 100%; height: 36px; margin: 2px 0; accent-color: var(--green); cursor: pointer; }
+.equipment-control:nth-child(2) input[type="range"] { accent-color: var(--red); }
+.equipment-control output { color: #b8a6c4; font: 10px Consolas, monospace; }
+#deploy-equipment { flex: 1; color: #263023; background: #d2edab; border-color: #d2edab; font-weight: 600; }
+@media (max-width: 900px) { .equipment-toggle { left: 163px; } #equipment-panel { left: 22px; max-width: calc(100% - 44px); } }
+@media (max-width: 600px) {
+  .equipment-toggle { left: 145px; }
+  #equipment-panel { left: 16px; top: 221px; bottom: max(162px, calc(env(safe-area-inset-bottom) + 135px)); width: calc(100% - 32px); max-width: none; }
+  .equipment-scroll { padding: 0 15px; }
+  .equipment-armies, .equipment-columns { gap: 18px; }
+  .equipment-control input[type="range"] { height: 44px; }
+  .equipment-percent input { min-height: 44px; font-size: 16px; }
+}
+@media (max-height: 640px) { #equipment-panel { top: 72px; bottom: 105px; } }
