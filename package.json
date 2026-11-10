@@ -1,0 +1,19 @@
+{
+  "name": "pluto-battle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --experimental-strip-types --no-warnings --test tests/*.test.ts",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:audio:browser": "node scripts/audio-smoke.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "test:balance": "node --experimental-strip-types --no-warnings scripts/balance-check.mjs",
+    "test:tuning": "node scripts/tuning-smoke.mjs"
+  },
+  "dependencies": { "three": "0.170.0" },
+  "devDependencies": { "@types/three": "0.170.0", "typescript": "5.9.3", "vite": "6.4.5", "playwright": "1.49.1" }
+}
