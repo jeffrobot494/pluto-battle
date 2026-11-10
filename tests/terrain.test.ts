@@ -7,12 +7,29 @@ import { DEFAULT_TUNING } from '../src/tuning.ts';
 import * as THREE from 'three';
 import { addTerrainWorld } from '../src/terrain-renderer.ts';
 import { random } from '../src/random.ts';
+import { ARCHETYPES, mirrored, pickArchetype } from '../src/terrain-archetypes.ts';
+import { Noise, gradeProfile } from '../src/terrain-shapes.ts';
+import { deploymentBounds, padDistance } from '../src/terrain.ts';
 
 test('terrain seeds reproduce exact geometry and fresh seeds change the battlefield', () => {
   const a = generateTerrain(DEFAULT_TUNING, 17), b = generateTerrain(DEFAULT_TUNING, 17), c = generateTerrain(DEFAULT_TUNING, 18);
   assert.deepEqual(a.heights, b.heights); assert.deepEqual(a.rocks, b.rocks); assert.notDeepEqual(a.heights, c.heights);
-  assert.ok(a.minHeight < -0.3); assert.ok(a.maxHeight > 2);
-  for (const kind of ['basin', 'hill', 'mesa', 'ridge']) assert.ok(a.features.some(f => f.kind === kind));
+  assert.ok(a.maxHeight - a.minHeight > 4, `relief ${a.maxHeight - a.minHeight}`);
+  assert.equal(a.archetype, pickArchetype(17).id); assert.ok(a.name && a.region && a.palette);
+  const kinds = new Set<string>(); for (let seed = 0; seed < 60; seed++) kinds.add(pickArchetype(seed).id);
+  assert.ok(kinds.size >= 8, `only ${kinds.size} landscape types in 60 seeds`);
+});
+
+test('shape primitives are deterministic, mirrored maps are point-symmetric and graded profiles respect the grade', () => {
+  const a = new Noise(random(5)), b = new Noise(random(5));
+  for (let i = 0; i < 50; i++) assert.equal(a.fbm(i * 0.37, -i * 0.21), b.fbm(i * 0.37, -i * 0.21));
+  const f = (x: number, z: number) => Math.sin(x * 0.7) + z * 0.3 + x * z * 0.05;
+  const m = mirrored({ d: 34 } as never, f);
+  for (let i = 0; i < 50; i++) { const x = (i * 1.37) % 28 - 14, z = (i * 2.11) % 34 - 17; assert.ok(Math.abs(m(x, z) - m(-x, -z)) < 1e-12); }
+  const profile = Float64Array.from({ length: 40 }, (_, i) => (i > 20 ? 6 : 0) + Math.sin(i) * 0.5), ds = 0.4;
+  assert.equal(gradeProfile(profile, ds, 0.5), true);
+  for (let i = 1; i < profile.length; i++) assert.ok(Math.abs(profile[i] - profile[i - 1]) <= 0.5 * ds + 1e-9);
+  assert.equal(gradeProfile(Float64Array.of(0, 0, 10), 1, 0.5), false);
 });
 
 test('team occupancy acceleration stays exact across movement, deaths and queued spawns', () => {
@@ -31,12 +48,14 @@ test('team occupancy acceleration stays exact across movement, deaths and queued
   assert.deepEqual(sim.grid.teamCounts, expected);
 });
 
-test('100 generated maps support legal connected deployments and accessible mesa tops', () => {
-  for (let seed = 0; seed < 100; seed++) {
-    const tuning = seed % 3 === 0 ? { ...DEFAULT_TUNING, count: 500, columns: 23 }
+test('every landscape type supports legal connected deployments and reachable climbable tops without fallback', () => {
+  for (let i = 0; i < ARCHETYPES.length * 4; i++) {
+    const archetype = ARCHETYPES[i % ARCHETYPES.length].id, seed = 1 + i * 7907;
+    const tuning = i % 3 === 0 ? { ...DEFAULT_TUNING, count: 500, columns: 23 }
       : seed % 3 === 1 ? { ...DEFAULT_TUNING, count: 64, columns: 8, radius: 0.4, halfWidth: 12, halfDepth: 22, frontline: 8 }
       : { ...DEFAULT_TUNING };
-    const { terrain, navigation } = prepareTerrain(tuning, seed);
+    const { terrain, navigation } = prepareTerrain(tuning, seed, archetype);
+    assert.equal(terrain.archetype, archetype); assert.equal(terrain.fallback, false, `fallback ${archetype} seed ${seed}`);
     const sim = new BattleSimulation(tuning.count, 74319, 2048, tuning, terrain, navigation);
     let region = -1;
     for (let i = 0; i < sim.used; i++) {
@@ -45,11 +64,24 @@ test('100 generated maps support legal connected deployments and accessible mesa
       if (region < 0) region = navigation.regions[node];
       assert.equal(navigation.regions[node], region, `disconnected spawn seed ${seed}`);
     }
-    for (const f of terrain.features) if (f.kind === 'mesa') {
-      const node = navigation.nodeAt(f.x, f.z); assert.ok(node >= 0, `mesa has no approach seed ${seed}`);
-      assert.equal(navigation.regions[node], region, `isolated mesa seed ${seed}`);
+    for (const f of terrain.features) if (f.climbable && Math.abs(f.x) < terrain.halfWidth - 1 && Math.abs(f.z) < terrain.halfDepth - 1) {
+      const node = navigation.nodeAt(f.x, f.z); assert.ok(node >= 0, `${f.kind} has no approach ${archetype} seed ${seed}`);
+      assert.equal(navigation.regions[node], region, `isolated ${f.kind} ${archetype} seed ${seed}`);
     }
-    assert.ok(terrain.repairs <= 5);
+  }
+});
+
+test('asymmetric fortress maps put the defender on a raised, level plateau', () => {
+  for (const seed of [3, 41, 977]) {
+    const { terrain } = prepareTerrain(DEFAULT_TUNING, seed, 'fortress'), bounds = deploymentBounds(DEFAULT_TUNING);
+    assert.ok(terrain.defender === 0 || terrain.defender === 1);
+    assert.ok(terrain.pads[terrain.defender] > terrain.pads[1 - terrain.defender] + 2, `pads ${terrain.pads}`);
+    let lo = Infinity, hi = -Infinity;
+    for (let x = -bounds.spawnX + 0.5; x < bounds.spawnX; x += 1) for (let z = bounds.spawnNear + 0.5; z < bounds.spawnFar; z += 1) {
+      const zz = terrain.defender === 0 ? z : -z; if (padDistance(x, zz, terrain.defender, bounds) > -0.5) continue;
+      const h = terrain.heightAt(x, zz); lo = Math.min(lo, h); hi = Math.max(hi, h);
+    }
+    assert.ok(hi - lo < 0.5, `defender pad not level: ${lo}..${hi}`);
   }
 });
 
@@ -217,4 +249,21 @@ test('terrain battles replay identically, preserve support and finish across fix
     }
     assert.notEqual(a.result, 'running', `stalled seed ${seed}`); assert.equal(a.result, b.result); assert.deepEqual(a.x, b.x); assert.deepEqual(a.hp, b.hp);
   }
+});
+
+test('maps that once jammed whole armies in one-file slots now reach a result', () => {
+  // mesas: both armies funnelled into a slot between mesas; badlands: a one-cell maze corridor.
+  for (const [id, seed] of [['mesas', 16338], ['craters', 24257], ['badlands', 900], ['badlands', 6907], ['escarpment', 54963]] as const) {
+    const { terrain, navigation } = prepareTerrain(DEFAULT_TUNING, seed, id);
+    const sim = new BattleSimulation(100, 74319, 2048, DEFAULT_TUNING, terrain, navigation);
+    for (let t = 0; t < 24000 && sim.result === 'running'; t++) sim.step();
+    assert.notEqual(sim.result, 'running', `${id} ${seed} stalled at ${sim.alive[0]}v${sim.alive[1]}`);
+  }
+});
+
+test('flow fields charge extra for narrow ground so armies prefer wide approaches', () => {
+  const { navigation } = prepareTerrain(DEFAULT_TUNING, 900, 'badlands');
+  let open = 0, slot = 0;
+  for (let n = 0; n < navigation.walkable.length; n++) if (navigation.walkable[n]) { if (navigation.clearance[n] > 3) open = navigation.crowding[n]; else if (navigation.clearance[n] < 0.7) slot = navigation.crowding[n]; }
+  assert.equal(open, 1); assert.ok(slot > 3, `slot cost ${slot}`);
 });

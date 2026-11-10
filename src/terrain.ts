@@ -1,9 +1,10 @@
 import { random } from './random.ts';
 import type { TuningValues } from './tuning.ts';
+import { archetypeById, mirrored, pickArchetype, spires, type GenerationContext, type Landform, type TerrainPalette } from './terrain-archetypes.ts';
+import { Noise, clamp, gradeProfile, lerp, polylineDistance, smooth } from './terrain-shapes.ts';
 
+export type { Landform, TerrainPalette } from './terrain-archetypes.ts';
 export interface Rock { x: number; z: number; radius: number; base: number; height: number; angle: number }
-export interface Landform { kind: 'basin' | 'hill' | 'mesa' | 'ridge'; x: number; z: number; rx: number; rz: number; height: number }
-const smooth = (v: number) => { const t = Math.max(0, Math.min(1, v)); return t * t * (3 - 2 * t); };
 export const MAX_SLOPE = 0.85;
 const SIDES = 8, APOTHEM = Math.cos(Math.PI / SIDES);
 
@@ -26,11 +27,24 @@ export class Terrain {
   minHeight = 0;
   generationMs = 0;
   repairs = 0;
+  /** True when every repair failed and the map was flattened. */
+  fallback = false;
   readonly halfWidth: number;
   readonly halfDepth: number;
   readonly seed: number;
   readonly rocks: Rock[];
   readonly features: Landform[];
+  /** Map identity and look; the flat fixture keeps the defaults. */
+  archetype = 'flat';
+  name = 'Flat';
+  region = 'Test Range';
+  palette: TerrainPalette | null = null;
+  /** −1 on mirrored maps, otherwise the defending team. */
+  defender = -1;
+  /** Deployment pad heights for team 0 (+z) and team 1 (−z). */
+  pads: [number, number] = [0, 0];
+  /** Carved walkways: designed ramps first, then any repair ramps. */
+  readonly ramps: { points: Float64Array; halfWidth: number; repair: boolean }[] = [];
 
   constructor(halfWidth: number, halfDepth: number, seed = 0,
     rocks: Rock[] = [], features: Landform[] = [], resolution = 0.65) {
@@ -163,46 +177,142 @@ export class Terrain {
   }
 }
 
-export function generateTerrain(tuning: TuningValues, seed: number) {
-  const start = performance.now(), rng = random(seed), w = tuning.halfWidth, d = tuning.halfDepth;
-  const terrain = new Terrain(w, d, seed >>> 0), columns = Math.min(tuning.columns, tuning.count), rows = Math.ceil(tuning.count / columns);
-  const spawnX = (columns - 1) / 2 * tuning.columnSpacing + tuning.jitterX + tuning.radius + 0.9;
-  const spawnNear = tuning.frontline - tuning.radius - 0.9, spawnFar = tuning.frontline + (rows - 1) * tuning.rowSpacing + tuning.jitterZ + tuning.radius + 0.9;
-  const safe = (x: number, z: number) => smooth(Math.max(Math.abs(x) - spawnX, spawnNear - Math.abs(z), Math.abs(z) - spawnFar) / 1.8);
-  const span = Math.min(w, d), features = terrain.features;
-  features.push({ kind: 'ridge', x: 0, z: (rng() - 0.5) * Math.min(5, tuning.frontline * 0.5), rx: w * 1.3, rz: Math.min(4.2, span * 0.34), height: Math.min(3.7, span * 0.3) });
-  features.push({ kind: 'basin', x: -w * (0.22 + rng() * 0.25), z: (rng() - 0.5) * d * 0.5, rx: span * 0.33, rz: span * 0.36, height: -Math.min(2, span * 0.17) });
-  features.push({ kind: 'hill', x: w * (0.2 + rng() * 0.2), z: -d * (0.12 + rng() * 0.18), rx: span * 0.4, rz: span * 0.45, height: Math.min(2.7, span * 0.23) });
-  for (let i = 0; i < 3; i++) features.push({ kind: 'mesa', x: (i % 2 ? -1 : 1) * Math.min(w - Math.min(3.5, span * 0.24) - 0.8, Math.max(spawnX + 4, w * (0.58 + rng() * 0.15))), z: (i % 2 ? -1 : 1) * d * (0.36 + rng() * 0.12), rx: Math.min(3.5, span * 0.24), rz: Math.min(5.5, span * 0.38), height: Math.min(2.8, span * 0.24) });
-  const pass1 = -w * (0.25 + rng() * 0.15), pass2 = w * (0.25 + rng() * 0.15), passWidth = Math.max(2, tuning.radius * 6);
-  for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) {
-    const x = -w + c * terrain.dx, z = -d + r * terrain.dz;
-    let y = 0.12 * Math.sin(x * 0.29 + rng() * 0.08) * Math.cos(z * 0.23);
-    for (const f of features) {
-      if (f.kind === 'ridge') {
-        const center = f.z + Math.sin(x / w * 3 + seed % 7) * Math.min(2.4, d * 0.15);
-        const profile = smooth(1 - Math.abs(z - center) / f.rz);
-        const gap = smooth(Math.min(Math.abs(x - pass1), Math.abs(x - pass2)) / passWidth);
-        y += f.height * profile * (0.12 + 0.88 * gap);
-      } else {
-        const qx = Math.abs((x - f.x) / f.rx), qz = Math.abs((z - f.z) / f.rz);
-        const shape = f.kind === 'mesa' ? smooth((1 - qx) * 5) * smooth(1 - qz) : smooth(1 - Math.hypot(qx, qz));
-        if (f.kind === 'mesa') { if (shape > 0) y = Math.max(y, f.height * shape); }
-        else y += f.height * shape;
-      }
+
+export interface DeploymentBounds { spawnX: number; spawnNear: number; spawnFar: number }
+/** Deployment rectangles shared by generation, repair and tests: |x| ≤ spawnX, spawnNear ≤ ±z ≤ spawnFar. */
+export function deploymentBounds(tuning: TuningValues): DeploymentBounds {
+  const columns = Math.min(tuning.columns, tuning.count), rows = Math.ceil(tuning.count / columns);
+  return {
+    spawnX: (columns - 1) / 2 * tuning.columnSpacing + tuning.jitterX + tuning.radius + 0.9,
+    spawnNear: tuning.frontline - tuning.radius - 0.9,
+    spawnFar: tuning.frontline + (rows - 1) * tuning.rowSpacing + tuning.jitterZ + tuning.radius + 0.9,
+  };
+}
+/** Signed distance outside a team's deployment rectangle (negative inside). */
+export function padDistance(x: number, z: number, team: number, b: DeploymentBounds) {
+  const zz = team === 0 ? z : -z;
+  return Math.max(Math.abs(x) - b.spawnX, b.spawnNear - zz, zz - b.spawnFar);
+}
+export const padClearance = (x: number, z: number, b: DeploymentBounds) => Math.min(padDistance(x, z, 0, b), padDistance(x, z, 1, b));
+
+function polylineLength(points: ArrayLike<number>) {
+  let length = 0;
+  for (let i = 0; i + 3 < points.length; i += 2) length += Math.hypot(points[i + 2] - points[i], points[i + 3] - points[i + 1]);
+  return length;
+}
+/** Evenly spaced samples along a polyline: flat [x, z, ...]. */
+function resample(points: ArrayLike<number>, n: number) {
+  const out = new Float64Array(n * 2), length = polylineLength(points);
+  let segment = 0, travelled = 0;
+  for (let i = 0; i < n; i++) {
+    const s = n > 1 ? length * i / (n - 1) : 0;
+    while (segment + 5 < points.length) {
+      const l = Math.hypot(points[segment + 2] - points[segment], points[segment + 3] - points[segment + 1]);
+      if (travelled + l >= s) break;
+      travelled += l; segment += 2;
     }
-    // Broad protected shoulders connect the deployments to the middle.
-    terrain.heights[r * (terrain.columns + 1) + c] = y * safe(x, z);
+    const l = Math.hypot(points[segment + 2] - points[segment], points[segment + 3] - points[segment + 1]), t = l > 1e-9 ? clamp((s - travelled) / l, 0, 1) : 0;
+    out[i * 2] = lerp(points[segment], points[segment + 2], t); out[i * 2 + 1] = lerp(points[segment + 1], points[segment + 3], t);
   }
+  return out;
+}
+
+/** Carving weight that leaves deployment pads untouched and blends back in just outside them. */
+export const padGuard = (b: DeploymentBounds) => (x: number, z: number) => smooth(padClearance(x, z, b) / 0.3);
+
+/** Grade a walkway along `points` (at most `grade` rise per unit) and blend it into
+ * the surface: flat across `halfWidth`, then a `shoulder` blend. Cuts and fills.
+ * Does not rebuild. Returns whether the whole climb fitted the grade. */
+export function carveRamp(terrain: Terrain, points: ArrayLike<number>, halfWidth: number, grade = 0.5, shoulder = 2, protect?: (x: number, z: number) => number) {
+  const length = polylineLength(points);
+  if (length < 1e-6) return true;
+  const n = Math.max(2, Math.ceil(length / (Math.min(terrain.dx, terrain.dz) * 0.5)) + 1), step = length / (n - 1), samples = resample(points, n), profile = new Float64Array(n);
+  for (let i = 0; i < n; i++) profile[i] = terrain.heightAt(samples[i * 2], samples[i * 2 + 1]);
+  const feasible = gradeProfile(profile, step, grade), reach = halfWidth + shoulder, out = new Float64Array(1);
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i + 1 < points.length; i += 2) { x0 = Math.min(x0, points[i]); x1 = Math.max(x1, points[i]); z0 = Math.min(z0, points[i + 1]); z1 = Math.max(z1, points[i + 1]); }
+  const c0 = Math.max(0, Math.floor((x0 - reach + terrain.halfWidth) / terrain.dx)), c1 = Math.min(terrain.columns, Math.ceil((x1 + reach + terrain.halfWidth) / terrain.dx));
+  const r0 = Math.max(0, Math.floor((z0 - reach + terrain.halfDepth) / terrain.dz)), r1 = Math.min(terrain.rows, Math.ceil((z1 + reach + terrain.halfDepth) / terrain.dz));
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const x = -terrain.halfWidth + c * terrain.dx, z = -terrain.halfDepth + r * terrain.dz, distance = polylineDistance(points, x, z, out);
+    if (distance >= reach) continue;
+    const f = clamp(out[0] / step, 0, n - 1), i = Math.min(n - 2, Math.floor(f)), target = lerp(profile[i], profile[i + 1], f - i);
+    const index = r * (terrain.columns + 1) + c, keep = protect ? protect(x, z) : 1;
+    if (keep > 0) terrain.heights[index] = lerp(terrain.heights[index], target, (1 - smooth((distance - halfWidth) / shoulder)) * keep);
+  }
+  return feasible;
+}
+
+/** Seeded map: archetype layout, modifiers, spawn pads, designed ramps, rocks.
+ * `archetypeId` overrides the seed's own choice; `variant` re-rolls the layout for
+ * repair while keeping the public seed and archetype. */
+export function generateTerrain(tuning: TuningValues, seed: number, archetypeId?: string, variant = 0) {
+  const start = performance.now(), w = tuning.halfWidth, d = tuning.halfDepth;
+  const archetype = (archetypeId ? archetypeById(archetypeId) : undefined) ?? pickArchetype(seed);
+  const stream = variant ? (Math.imul((seed >>> 0) ^ 0x27d4eb2f, 2 * variant + 1) >>> 0) : seed >>> 0;
+  const rng = random(stream), terrain = new Terrain(w, d, seed >>> 0), bounds = deploymentBounds(tuning);
+  const ctx: GenerationContext = { w, d, H: clamp(Math.min(w, d) * 0.45, 3, 13), rng, noise: new Noise(rng), detail: new Noise(random(stream ^ 0x5bd1e995)), ...bounds, radius: tuning.radius };
+  const plan = archetype.build(ctx);
+  const spire = plan.defender < 0 && archetype.id !== 'ice' && rng() < 0.3 ? spires(ctx, 1 + Math.floor(rng() * 3)) : null;
+  const base = plan.defender < 0 ? mirrored(ctx, plan.height) : plan.height;
+  const surface = spire ? (x: number, z: number) => base(x, z) + spire(x, z) : base, stride = terrain.columns + 1;
+  for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) terrain.heights[r * stride + c] = surface(-w + c * terrain.dx, -d + r * terrain.dz);
+
+  // Spawn pads: flat at the archetype's height, or a gently tilted plane fitted to the raw surface.
+  for (let team = 0; team < 2; team++) {
+    let n = 0, mx = 0, mz = 0, mh = 0, sxh = 0, szh = 0, sxx = 0, szz = 0;
+    for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) {
+      const x = -w + c * terrain.dx, z = -d + r * terrain.dz;
+      if (padDistance(x, z, team, bounds) > 0) continue;
+      const h = terrain.heights[r * stride + c]; n++; mx += x; mz += z; mh += h; sxh += x * h; szh += z * h; sxx += x * x; szz += z * z;
+    }
+    if (!n) continue;
+    mx /= n; mz /= n; mh /= n;
+    const vx = sxx / n - mx * mx, vz = szz / n - mz * mz, target = plan.pads[team];
+    let bx = target === null && vx > 1e-6 ? (sxh / n - mx * mh) / vx : 0, bz = target === null && vz > 1e-6 ? (szh / n - mz * mh) / vz : 0;
+    const tilt = Math.hypot(bx, bz), limit = 0.3; if (tilt > limit) { bx *= limit / tilt; bz *= limit / tilt; }
+    const level = target ?? mh; terrain.pads[team] = level;
+    for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) {
+      const x = -w + c * terrain.dx, z = -d + r * terrain.dz, distance = padDistance(x, z, team, bounds);
+      if (distance >= plan.padBlend) continue;
+      const index = r * stride + c, pad = level + bx * (x - mx) + bz * (z - mz) + ctx.detail.fbm(x * 0.3, z * 0.3, 2) * 0.05;
+      terrain.heights[index] = lerp(terrain.heights[index], pad, 1 - smooth(distance / plan.padBlend));
+    }
+  }
+
+  // Designed ramps; skip any that would run through the middle of a deployment.
+  for (const ramp of plan.ramps) {
+    const length = polylineLength(ramp.points), n = Math.max(2, Math.ceil(length / 0.5)), samples = resample(ramp.points, n);
+    let crosses = false;
+    for (let i = 0; i < n && !crosses; i++) { const s = length * i / (n - 1); if (s > 2 && s < length - 2 && padClearance(samples[i * 2], samples[i * 2 + 1], bounds) < ramp.halfWidth + 1) crosses = true; }
+    if (crosses) continue;
+    carveRamp(terrain, ramp.points, ramp.halfWidth, 0.5, 2, padGuard(bounds));
+    terrain.ramps.push({ points: ramp.points, halfWidth: ramp.halfWidth, repair: false });
+  }
+  terrain.features.push(...plan.features);
+  terrain.archetype = archetype.id; terrain.name = archetype.name; terrain.region = archetype.regions[Math.floor(rng() * archetype.regions.length)];
+  terrain.palette = archetype.palette; terrain.defender = plan.defender;
   terrain.rebuild();
-  const count = Math.min(62, Math.floor(w * d / 23));
-  for (let attempt = 0; terrain.rocks.length < count && attempt < count * 30; attempt++) {
-    const x = (rng() * 2 - 1) * (w - 1.5), z = (rng() * 2 - 1) * (d - 1.5), radius = 0.42 + rng() * 0.65;
-    if (safe(x, z) < 0.99 || Math.min(Math.abs(x - pass1), Math.abs(x - pass2)) < passWidth + radius + 0.7 || terrain.slopeAt(x, z) > 0.45) continue;
-    if (features.some(f => f.kind === 'mesa' && Math.hypot(x - f.x, z - f.z) < radius + 1.8)) continue;
-    if (terrain.rocks.some(b => Math.hypot(x - b.x, z - b.z) < radius + b.radius + 1.4)) continue;
-    terrain.rocks.push({ x, z, radius, base: terrain.heightAt(x, z) - 0.22, height: 0.95 + rng() * 1.15, angle: rng() * Math.PI });
-  }
+  placeRocks(terrain, plan.rocks, rng, bounds);
   terrain.rebuild(); terrain.generationMs = performance.now() - start;
   return terrain;
+}
+
+function placeRocks(terrain: Terrain, style: { density: number; radius: [number, number]; height: [number, number]; clusters: number }, rng: () => number, bounds: DeploymentBounds) {
+  const w = terrain.halfWidth, d = terrain.halfDepth, count = Math.min(220, Math.floor(w * d / 23 * style.density)), rocks = terrain.rocks;
+  for (let attempt = 0; rocks.length < count && attempt < count * 30; attempt++) {
+    let x: number, z: number;
+    if (rocks.length && rng() < style.clusters) {
+      const b = rocks[Math.floor(rng() * rocks.length)], a = rng() * Math.PI * 2, r = b.radius + 1.2 + rng() * 2.2;
+      x = b.x + Math.cos(a) * r; z = b.z + Math.sin(a) * r;
+    } else { x = (rng() * 2 - 1) * (w - 1.5); z = (rng() * 2 - 1) * (d - 1.5); }
+    let radius = lerp(style.radius[0], style.radius[1], rng());
+    if (rng() < 0.06) radius = Math.min(2, radius * 1.7);
+    const height = lerp(style.height[0], style.height[1], rng()) * (radius > 1.3 ? 1.3 : 1);
+    if (Math.abs(x) > w - 1.5 || Math.abs(z) > d - 1.5 || padClearance(x, z, bounds) < 1.5 + radius || terrain.slopeAt(x, z) > 0.45) continue;
+    if (terrain.ramps.some(p => polylineDistance(p.points, x, z) < p.halfWidth + radius + 0.7)) continue;
+    if (terrain.features.some(f => f.climbable && Math.hypot(x - f.x, z - f.z) < radius + 1.8)) continue;
+    if (rocks.some(b => Math.hypot(x - b.x, z - b.z) < radius + b.radius + 0.9)) continue;
+    rocks.push({ x, z, radius, base: terrain.heightAt(x, z) - 0.22, height, angle: rng() * Math.PI });
+  }
 }
