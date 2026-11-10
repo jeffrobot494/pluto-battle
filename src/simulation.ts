@@ -130,6 +130,29 @@ export class BattleSimulation {
   private readonly nextRetarget: Float64Array;
   private readonly detourCos = new Float64Array(6);
   private readonly detourSin = new Float64Array(6);
+  // Flanking: progress anchors detect soldiers pinned behind their own line;
+  // a committed waypoint beyond the line edge carries them around it.
+  private readonly anchorX: Float32Array;
+  private readonly anchorZ: Float32Array;
+  private readonly anchorTime: Float64Array;
+  private readonly flankX: Float32Array;
+  private readonly flankZ: Float32Array;
+  private readonly flankUntil: Float64Array;
+  private readonly flankTries: Uint8Array;
+  /** 0 = normal pursuit, 1 = flanking around the line edge, 2 = backing off to find space. */
+  readonly flankState: Uint8Array;
+  private readonly engaged: Uint8Array;
+  // Per-team line frame: forward axis toward the enemy, lateral extent and depth of the line.
+  private readonly lineForwardX = new Float64Array(2);
+  private readonly lineForwardZ = new Float64Array(2);
+  private readonly lineMin = new Float64Array(2);
+  private readonly lineMax = new Float64Array(2);
+  private readonly lineDepth = new Float64Array(2);
+  private flankBudget = 0;
+  private flankDirX = 0;
+  private flankDirZ = 0;
+  private flankDistance = 0;
+  totalFlanks = 0;
   readonly velocityX: Float64Array;
   readonly velocityY: Float64Array;
   readonly velocityZ: Float64Array;
@@ -218,6 +241,9 @@ export class BattleSimulation {
     this.nextFire = new Float64Array(capacity); this.nextSearch = new Float64Array(capacity);
     this.moving = new Uint8Array(capacity); this.pendingDamage = new Float32Array(capacity);
     this.detourSide = new Int8Array(capacity);
+    this.anchorX = new Float32Array(capacity); this.anchorZ = new Float32Array(capacity); this.anchorTime = new Float64Array(capacity);
+    this.flankX = new Float32Array(capacity); this.flankZ = new Float32Array(capacity); this.flankUntil = new Float64Array(capacity);
+    this.flankTries = new Uint8Array(capacity); this.flankState = new Uint8Array(capacity); this.engaged = new Uint8Array(capacity);
     this.grid = new SpatialGrid(capacity, this.tuning.halfWidth, this.tuning.halfDepth, this.team); this.rng = random(seed);
     // A separate stream preserves deployment/fire randomness. Handedness has no
     // relationship to unit IDs, team, column parity, or storage order.
@@ -312,6 +338,8 @@ export class BattleSimulation {
     this.x[slot] = this.previousX[slot] = x; this.z[slot] = this.previousZ[slot] = z;
     this.y[slot] = this.previousY[slot] = this.terrain.heightAt(x, z); this.visible[slot] = 0; this.aimPitch[slot] = 0; this.lastProgress[slot] = this.time;
     this.avoidanceX[slot] = this.avoidanceZ[slot] = this.nextRetarget[slot] = 0;
+    this.anchorX[slot] = x; this.anchorZ[slot] = z; this.anchorTime[slot] = this.time;
+    this.flankState[slot] = this.flankTries[slot] = this.engaged[slot] = 0; this.flankUntil[slot] = 0;
     this.velocityX[slot] = this.velocityY[slot] = this.velocityZ[slot] = 0; this.grounded[slot] = 1;
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
@@ -476,6 +504,111 @@ export class BattleSimulation {
     return true;
   }
 
+  /** O(n) per tick: each army's firing-line frame, from last tick's engaged soldiers (or the whole army before contact). */
+  private updateLines() {
+    for (let team = 0; team < 2; team++) {
+      let fx = this.centerX[1 - team] - this.centerX[team], fz = this.centerZ[1 - team] - this.centerZ[team];
+      const length = Math.hypot(fx, fz);
+      if (length > 1e-6) { fx /= length; fz /= length; } else { fx = 0; fz = team === 0 ? -1 : 1; }
+      this.lineForwardX[team] = fx; this.lineForwardZ[team] = fz;
+    }
+    let min0 = Infinity, max0 = -Infinity, depth0 = 0, count0 = 0, allMin0 = Infinity, allMax0 = -Infinity, front0 = -Infinity;
+    let min1 = Infinity, max1 = -Infinity, depth1 = 0, count1 = 0, allMin1 = Infinity, allMax1 = -Infinity, front1 = -Infinity;
+    for (let i = 0; i < this.used; i++) {
+      if (this.hp[i] <= 0) continue;
+      const team = this.team[i], fx = this.lineForwardX[team], fz = this.lineForwardZ[team];
+      const rx = this.x[i] - this.centerX[team], rz = this.z[i] - this.centerZ[team];
+      const lateral = fx * rz - fz * rx, forward = fx * rx + fz * rz;
+      if (team === 0) {
+        if (lateral < allMin0) allMin0 = lateral; if (lateral > allMax0) allMax0 = lateral; if (forward > front0) front0 = forward;
+        if (this.engaged[i]) { if (lateral < min0) min0 = lateral; if (lateral > max0) max0 = lateral; depth0 += forward; count0++; }
+      } else {
+        if (lateral < allMin1) allMin1 = lateral; if (lateral > allMax1) allMax1 = lateral; if (forward > front1) front1 = forward;
+        if (this.engaged[i]) { if (lateral < min1) min1 = lateral; if (lateral > max1) max1 = lateral; depth1 += forward; count1++; }
+      }
+    }
+    if (count0) { this.lineMin[0] = min0; this.lineMax[0] = max0; this.lineDepth[0] = depth0 / count0; }
+    else { this.lineMin[0] = allMin0; this.lineMax[0] = allMax0; this.lineDepth[0] = front0; }
+    if (count1) { this.lineMin[1] = min1; this.lineMax[1] = max1; this.lineDepth[1] = depth1 / count1; }
+    else { this.lineMin[1] = allMin1; this.lineMax[1] = allMax1; this.lineDepth[1] = front1; }
+  }
+
+  private resetAnchor(i: number) { this.anchorX[i] = this.x[i]; this.anchorZ[i] = this.z[i]; this.anchorTime[i] = this.time; }
+
+  /** A soldier that is not walking this tick (airborne, idle or firing) is never stuck; firing also ends any flank. */
+  private holdFlank(i: number, engaged: number) {
+    this.engaged[i] = engaged;
+    if (engaged) this.flankState[i] = this.flankTries[i] = 0;
+    this.resetAnchor(i);
+  }
+
+  /**
+   * Runs stuck detection and flank commitment for a walking soldier. Returns true while it should steer
+   * toward its waypoint, leaving the unit direction in flankDirX/Z and the remaining distance in flankDistance.
+   */
+  private steerFlank(i: number): boolean {
+    this.engaged[i] = 0;
+    let state = this.flankState[i];
+    if (state && this.time >= this.flankUntil[i]) { if (state === 1 && this.flankTries[i] < 255) this.flankTries[i]++; state = this.flankState[i] = 0; }
+    // Too little net displacement over the window counts as stuck, even if it shuffled every tick.
+    if (this.time - this.anchorTime[i] >= this.tuning.flankStuckTime) {
+      const stuck = Math.hypot(this.x[i] - this.anchorX[i], this.z[i] - this.anchorZ[i]) < this.tuning.speed * this.tuning.flankStuckTime * 0.25;
+      if (!stuck) this.resetAnchor(i);
+      else if (this.flankBudget > 0) {
+        this.flankBudget--;
+        if (state === 1 && this.flankTries[i] < 255) this.flankTries[i]++;
+        this.chooseFlank(i); state = this.flankState[i]; this.resetAnchor(i);
+      }
+    }
+    if (!state) return false;
+    const wx = this.flankX[i] - this.x[i], wz = this.flankZ[i] - this.z[i], wd = Math.hypot(wx, wz);
+    // Arrival hands back to normal pursuit, now with open space beside the line.
+    if (wd < 0.5) { if (state === 2) this.flankTries[i] = 0; this.flankState[i] = 0; return false; }
+    this.flankDirX = wx / wd; this.flankDirZ = wz / wd; this.flankDistance = wd;
+    return true;
+  }
+
+  /** Bounded check of a flank waypoint: inside the field and, on terrain, walkable with a clear first stretch. */
+  private flankReachable(i: number, wx: number, wz: number) {
+    const r = this.radius[i];
+    if (Math.abs(wx) > this.grid.halfWidth - r - 0.05 || Math.abs(wz) > this.grid.halfDepth - r - 0.05) return false;
+    const nav = this.navigation; if (!nav) return true;
+    if (!nav.walkable[this.terrain.cell(wx, wz)]) return false;
+    const dx = wx - this.x[i], dz = wz - this.z[i], length = Math.hypot(dx, dz), probe = Math.min(1, 4 / (length || 1));
+    return this.terrain.canTraverse(this.x[i], this.z[i], this.x[i] + dx * probe, this.z[i] + dz * probe, r);
+  }
+
+  /** Commit a blocked soldier to a point just beyond the nearer edge of its own line, or back off when boxed in. */
+  private chooseFlank(i: number) {
+    const team = this.team[i], fx = this.lineForwardX[team], fz = this.lineForwardZ[team], lx = -fz, lz = fx;
+    const cx = this.centerX[team], cz = this.centerZ[team], rx = this.x[i] - cx, rz = this.z[i] - cz;
+    const lateral = lx * rx + lz * rz, forward = fx * rx + fz * rz;
+    const tries = this.flankTries[i];
+    if (tries <= 3) {
+      const gap = this.tuning.flankSpacing * (1 + tries), min = this.lineMin[team], max = this.lineMax[team];
+      const toMin = lateral - min, toMax = max - lateral;
+      // Split the pile down the middle; personal handedness breaks near-ties.
+      const preferred = Math.abs(toMin - toMax) < 0.5 ? this.detourSide[i] : toMin < toMax ? -1 : 1;
+      // Ease toward the line's depth while mostly travelling sideways around it.
+      const depth = forward + Math.max(0, this.lineDepth[team] - 0.8 - forward) * 0.35;
+      for (let n = 0; n < 2; n++) {
+        const side = n === 0 ? preferred : -preferred, edge = side < 0 ? min - gap : max + gap;
+        const wx = cx + lx * edge + fx * depth, wz = cz + lz * edge + fz * depth;
+        if (this.flankReachable(i, wx, wz)) {
+          this.flankX[i] = wx; this.flankZ[i] = wz; this.flankState[i] = 1;
+          this.flankUntil[i] = this.time + this.tuning.flankTimeout; this.totalFlanks++;
+          return;
+        }
+      }
+    }
+    // Boxed in or repeatedly re-blocked: step back and to one side to open space, then try again.
+    const side = this.detourSide[i];
+    let wx = this.x[i] - fx * 1.5 + lx * side * 0.75, wz = this.z[i] - fz * 1.5 + lz * side * 0.75;
+    if (!this.flankReachable(i, wx, wz)) { wx = this.x[i] - fx * 1.5; wz = this.z[i] - fz * 1.5; }
+    this.flankX[i] = wx; this.flankZ[i] = wz; this.flankState[i] = 2; this.flankTries[i] = 0;
+    this.flankUntil[i] = this.time + 1;
+  }
+
   private updateNavigation() {
     const nav = this.navigation; if (!nav) return;
     if (this.tick === 1 || this.tick % 60 === 0) {
@@ -608,6 +741,9 @@ export class BattleSimulation {
     this.integrateBodies();
     if (this.result !== 'running') return;
     for (let team = 0; team < 2; team++) if (this.alive[team]) { this.centerX[team] /= this.alive[team]; this.centerZ[team] /= this.alive[team]; }
+    this.updateLines();
+    // Caps waypoint selection so a sudden pile-up cannot spike a frame.
+    this.flankBudget = Math.max(8, this.used >> 4);
     // Alternate direction and rotate priority to avoid a permanent first-mover advantage.
     for (let n = 0; n < this.used; n++) {
       const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
@@ -637,18 +773,19 @@ export class BattleSimulation {
       const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
       // Airborne soldiers can still aim and fire, but cannot walk until they land.
-      if (!this.grounded[i]) continue;
+      if (!this.grounded[i]) { this.holdFlank(i, 0); continue; }
       const engage = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
-      if (this.weaponsEnabled && engage) continue;
-      if (d < 0.001 || !this.alive[1 - this.team[i]]) continue;
+      if (this.weaponsEnabled && engage) { this.holdFlank(i, 1); continue; }
+      if (d < 0.001 || !this.alive[1 - this.team[i]]) { this.holdFlank(i, 0); continue; }
       let step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && engage ? d - gunRange + 0.08 : d));
-      if (step <= 0) continue;
+      if (step <= 0) { this.holdFlank(i, 0); continue; }
       let vx = dx / d, vz = dz / d, separationX = 0, separationZ = 0;
-      if (this.navigation) {
+      if (this.steerFlank(i)) { vx = this.flankDirX; vz = this.flankDirZ; step = Math.min(this.tuning.speed * CONFIG.step, this.flankDistance); }
+      else if (this.navigation) {
         if (this.navigation.direction(this.team[i], this.x[i], this.z[i])) {
           const length = Math.hypot(this.navigation.directionX, this.navigation.directionZ);
           vx = this.navigation.directionX / length; vz = this.navigation.directionZ / length;
-        } else if (!this.navigation.fields[this.team[i]].ready) continue;
+        } else if (!this.navigation.fields[this.team[i]].ready) { this.holdFlank(i, 0); continue; }
       }
       const refreshAvoidance = !this.navigation || (this.tick + i) % 2 === 0;
       if (refreshAvoidance) {
