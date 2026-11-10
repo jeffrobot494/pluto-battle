@@ -9,6 +9,7 @@ export const DEFAULT_TUNING = {
   jitterX: 0.04, jitterZ: 0.06, seed: CONFIG.seed as number,
   searchPadding: 5, searchInterval: 0.12, initialSearchDelay: 0.14,
   avoidanceDistance: 1.05, avoidanceStrength: 0.75, shallowAngle: 0.65, wideAngle: 1.2,
+  flankStuckTime: 0.5, flankTimeout: 4, flankSpacing: 0.9,
   flashDuration: CONFIG.hit.duration as number, flashIntensity: CONFIG.hit.intensity as number,
   gravity: CONFIG.physics.gravity as number, explosionRadius: CONFIG.explosion.radius as number,
   explosionDamage: CONFIG.explosion.damage as number, explosionImpulse: CONFIG.explosion.impulse as number,
@@ -48,6 +49,9 @@ export const TUNING: readonly TuningDefinition[] = [
   { key: 'avoidanceStrength', label: 'Neighbor avoidance strength', group: 'Crowd steering', min: 0, max: 3, step: 0.05, unit: '', restart: false, help: 'Higher values encourage spreading; lower values allow tighter crowds.' },
   { key: 'shallowAngle', label: 'Shallow detour angle', group: 'Crowd steering', min: 0.1, max: 1.5, step: 0.05, unit: 'rad', restart: false, help: 'First pair of left/right alternatives when forward motion is blocked.' },
   { key: 'wideAngle', label: 'Wide detour angle', group: 'Crowd steering', min: 0.2, max: 1.57, step: 0.05, unit: 'rad', restart: false, help: 'Wider left/right alternatives, followed by a sideways attempt in both directions.' },
+  { key: 'flankStuckTime', label: 'Flank stuck time', group: 'Crowd steering', min: 0.1, max: 3, step: 0.05, unit: 's', restart: false, help: 'How long a soldier must make almost no progress before it heads around the edge of its own firing line.' },
+  { key: 'flankTimeout', label: 'Flank commitment', group: 'Crowd steering', min: 0.5, max: 12, step: 0.1, unit: 's', restart: false, help: 'Maximum time spent pursuing one flank position before choosing again.' },
+  { key: 'flankSpacing', label: 'Flank spacing', group: 'Crowd steering', min: 0.4, max: 4, step: 0.05, unit: 'u', restart: false, help: 'Distance beyond the firing line edge where blocked soldiers aim; each repeated block adds more.' },
   { key: 'flashDuration', label: 'Damage-flash duration', group: 'Hit feedback', min: 0.02, max: 0.5, step: 0.01, unit: 's', restart: false, help: 'Duration of Pluto’s white hit flash.' },
   { key: 'flashIntensity', label: 'Damage-flash intensity', group: 'Hit feedback', min: 0.1, max: 3, step: 0.1, unit: '', restart: false, help: 'Brightness of the emissive hit flash.' },
 ];
