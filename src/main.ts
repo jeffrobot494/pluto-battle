@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+// Loads saved settings from RUN before any module below reads them.
+import './rundot-storage.ts';
 import './style.css';
 import { CONFIG } from './config.ts';
 import { BattleSimulation } from './simulation.ts';

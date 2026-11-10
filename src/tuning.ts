@@ -1,4 +1,5 @@
 import { CONFIG, WEAPONS } from './config.ts';
+import { readSetting, writeSetting } from './settings-store.ts';
 
 export const DEFAULT_TUNING = {
   count: CONFIG.defaultPerTeam as number, health: CONFIG.soldier.health as number,
@@ -76,12 +77,12 @@ export function deploymentError(v: TuningValues): string | null {
 const storageKey = 'pluto-battle-tuning-v1';
 export function loadTuning(): TuningValues {
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) ?? '{}'), values = { ...DEFAULT_TUNING };
+    const saved = JSON.parse(readSetting(storageKey) ?? '{}'), values = { ...DEFAULT_TUNING };
     for (const { key } of TUNING) if (validValue(key, saved[key])) values[key] = saved[key];
     return deploymentError(values) ? { ...DEFAULT_TUNING } : values;
   } catch { return { ...DEFAULT_TUNING }; }
 }
 export function saveTuning(values: TuningValues) {
   if (deploymentError(values)) return;
-  try { localStorage.setItem(storageKey, JSON.stringify(values)); } catch { /* In-memory tuning still works when browser storage is unavailable. */ }
+  try { writeSetting(storageKey, JSON.stringify(values)); } catch { /* In-memory tuning still works when browser storage is unavailable. */ }
 }

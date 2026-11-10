@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
+    "deploy": "npm run build && rundot deploy",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --experimental-strip-types --no-warnings --test tests/*.test.ts",
     "test:browser": "node scripts/browser-smoke.mjs",
@@ -23,6 +24,14 @@
     "benchmark:explosions": "node scripts/explosion-benchmark.mjs",
     "benchmark:simulation": "node --experimental-strip-types --no-warnings scripts/simulation-benchmark.mjs"
   },
-  "dependencies": { "three": "0.170.0" },
-  "devDependencies": { "@types/three": "0.170.0", "typescript": "5.9.3", "vite": "6.4.5", "playwright": "1.49.1" }
+  "dependencies": {
+    "@series-inc/rundot-game-sdk": "5.36.0",
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "@types/three": "0.170.0",
+    "playwright": "1.49.1",
+    "typescript": "5.9.3",
+    "vite": "6.4.5"
+  }
 }

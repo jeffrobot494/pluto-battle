@@ -1,0 +1,10 @@
+{
+  "gameId": "DJ4Oxa36Nu37dumd86GS",
+  "relativePathToDistFolder": "./dist",
+  "usesPreloader": false,
+  "fullscreenEnabled": true,
+  "maxDpr": 1.5,
+  "orientation": "both",
+  "keywords": null,
+  "kitId": null
+}

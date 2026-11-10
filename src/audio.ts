@@ -1,5 +1,6 @@
 import type { BattleSimulation } from './simulation.ts';
 import { WEAPON_ID } from './config.ts';
+import { readSetting, writeSetting } from './settings-store.ts';
 
 export const SOUND_EFFECTS = [
   { id: 'laser', label: 'Weapon firing', volume: 30, duration: 0.18, interval: 0.045 },
@@ -74,7 +75,7 @@ export class BattleAudio {
   constructor(onStateChange: () => void = () => {}) {
     this.onStateChange = onStateChange;
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
+      const saved = JSON.parse(readSetting(STORAGE_KEY) ?? 'null');
       for (const { id } of SOUND_EFFECTS) {
         if (typeof saved?.[id] === 'number' && Number.isFinite(saved[id])) this.volumes[id] = Math.round(Math.max(0, Math.min(100, saved[id])));
       }
@@ -88,7 +89,7 @@ export class BattleAudio {
     this.volumes[id] = Math.round(Math.max(0, Math.min(100, volume)));
     const channel = this.channels.get(id);
     if (channel && this.context) channel.gain.setTargetAtTime(this.volumes[id] / 100, this.context.currentTime, 0.008);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.volumes)); } catch { /* Session-only settings. */ }
+    try { writeSetting(STORAGE_KEY, JSON.stringify(this.volumes)); } catch { /* Session-only settings. */ }
   }
 
   /** Called inside a pointer/key gesture, including the first touch on mobile. */

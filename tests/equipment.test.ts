@@ -4,6 +4,7 @@ import { BattleSimulation } from '../src/simulation.ts';
 import { CONFIG, NO_WEAPON, WEAPON_ID, WEAPONS } from '../src/config.ts';
 import { copyEquipment, defaultEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from '../src/equipment.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
+import { writeSetting } from '../src/settings-store.ts';
 
 const bit = (w: number) => 1 << w;
 const all = bit(WEAPON_ID.rifle) | bit(WEAPON_ID.sniper) | bit(WEAPON_ID.shotgun);
@@ -125,19 +126,12 @@ test('invalid allocations are rejected and persisted values recover independentl
     settings[0].sniper = value; assert.equal(validateEquipment(settings), false);
     assert.throws(() => new BattleSimulation(1, 1, CONFIG.capacity, undefined, undefined, undefined, settings), /percentages/);
   }
-  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  let stored: string | null = null;
-  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => stored, setItem: (_key: string, value: string) => { stored = value; } } });
-  try {
-    const valid = defaultEquipment(); valid[0].sniper = 10; valid[1].shotgun = 45;
-    saveEquipment(valid); assert.deepEqual(loadEquipment(), valid);
-    stored = '[{"rifle":-1,"sniper":12,"shotgun":"50"},{"rifle":0,"sniper":101,"shotgun":75}]';
-    assert.deepEqual(loadEquipment(), [{ rifle: 100, sniper: 12, shotgun: 0 }, { rifle: 0, sniper: 0, shotgun: 75 }]);
-    stored = 'broken'; assert.deepEqual(loadEquipment(), defaultEquipment());
-  } finally {
-    if (original) Object.defineProperty(globalThis, 'localStorage', original);
-    else Reflect.deleteProperty(globalThis, 'localStorage');
-  }
+  const key = 'pluto-battle-equipment-v1';
+  const valid = defaultEquipment(); valid[0].sniper = 10; valid[1].shotgun = 45;
+  saveEquipment(valid); assert.deepEqual(loadEquipment(), valid);
+  writeSetting(key, '[{"rifle":-1,"sniper":12,"shotgun":"50"},{"rifle":0,"sniper":101,"shotgun":75}]');
+  assert.deepEqual(loadEquipment(), [{ rifle: 100, sniper: 12, shotgun: 0 }, { rifle: 0, sniper: 0, shotgun: 75 }]);
+  writeSetting(key, 'broken'); assert.deepEqual(loadEquipment(), defaultEquipment());
 });
 
 test('mixed-loadout battles reproduce combat and finish', () => {

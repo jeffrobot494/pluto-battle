@@ -1,4 +1,5 @@
 import { WEAPON_ID } from './config.ts';
+import { readSetting, writeSetting } from './settings-store.ts';
 
 // The item catalog references weapon definitions; army settings contain only allocation percentages.
 export const ARMY_ITEMS = [
@@ -30,7 +31,7 @@ const storageKey = 'pluto-battle-equipment-v1';
 export function loadEquipment(): EquipmentSettings {
   const values = defaultEquipment();
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null');
+    const saved = JSON.parse(readSetting(storageKey) ?? 'null');
     for (const team of [0, 1] as const) for (const item of ARMY_ITEMS) {
       if (validPercentage(saved?.[team]?.[item.id])) values[team][item.id] = saved[team][item.id];
     }
@@ -39,5 +40,5 @@ export function loadEquipment(): EquipmentSettings {
 }
 export function saveEquipment(values: EquipmentSettings) {
   if (!validateEquipment(values)) return;
-  try { localStorage.setItem(storageKey, JSON.stringify(values)); } catch { /* Session-only settings. */ }
+  try { writeSetting(storageKey, JSON.stringify(values)); } catch { /* Session-only settings. */ }
 }
