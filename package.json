@@ -18,7 +18,10 @@
     "test:browser:all": "node scripts/browser-regressions.mjs",
     "benchmark:terrain": "node scripts/terrain-benchmark.mjs",
     "test:terrain:campaign": "node --experimental-strip-types --no-warnings scripts/terrain-campaign.mjs",
-    "test:cover:browser": "node scripts/cover-smoke.mjs"
+    "test:cover:browser": "node scripts/cover-smoke.mjs",
+    "test:explosions:browser": "node scripts/explosion-smoke.mjs",
+    "benchmark:explosions": "node scripts/explosion-benchmark.mjs",
+    "benchmark:simulation": "node --experimental-strip-types --no-warnings scripts/simulation-benchmark.mjs"
   },
   "dependencies": { "three": "0.170.0" },
   "devDependencies": { "@types/three": "0.170.0", "typescript": "5.9.3", "vite": "6.4.5", "playwright": "1.49.1" }

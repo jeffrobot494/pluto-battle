@@ -10,6 +10,7 @@ import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type Eq
 import { EquipmentPanel } from './equipment-panel.ts';
 import { prepareTerrain } from './navigation.ts';
 import { PerformanceCapture } from './performance-capture.ts';
+import { ExplosionInput, type GroundPoint } from './explosion-input.ts';
 
 const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
@@ -36,6 +37,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <div class="view-controls" aria-label="Camera controls"><button id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><span></span><button id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button></div>
     <section id="outcome" class="outcome" hidden aria-live="polite"><span>ENGAGEMENT COMPLETE</span><h2 id="outcome-title"></h2><p id="outcome-description"></p><button id="play-again">Run another battle <span>↗</span></button></section>
     <div id="paused-notice" class="paused-notice" hidden>SIMULATION PAUSED</div>
+    <button id="explosion-toggle" class="explosion-toggle" aria-pressed="false" aria-describedby="explosion-status"><span aria-hidden="true">✳</span> Test explosions <small>OFF</small></button>
+    <p id="explosion-status" class="explosion-status" role="status" hidden>Click or tap ground to detonate · drag to pan</p>
     <footer class="bottom-bar">
       <div class="battle-note"><span class="status-light"></span><div id="engagement-label">ARMIES ADVANCING<small>100 vs 100 · AUTOMATIC ENGAGEMENT</small></div></div>
       <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart">${icons.restart}<span>Restart</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
@@ -100,13 +103,29 @@ function freshTerrainSeed() { return crypto.getRandomValues(new Uint32Array(1))[
 let terrainSeed = parameters.has('terrain') ? Number(parameters.get('terrain')) >>> 0 : freshTerrainSeed();
 let prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
 let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
+let explosionTesting = false;
+const explosionInput = new ExplosionInput(renderer.webgl.domElement, () => !paused && !document.hidden && sim.result === 'running',
+  (x, y) => renderer.pickGround(x, y, sim), point => explode(point), point => renderer.setExplosionPreview(point, tuning.explosionRadius));
+function explode(point: GroundPoint) {
+  sim.queue({ type: 'explode', ...point, radius: tuning.explosionRadius, damage: tuning.explosionDamage, impulse: tuning.explosionImpulse });
+}
+function setExplosionTesting(value: boolean) {
+  explosionTesting = value; explosionInput.setEnabled(value);
+  $('#explosion-toggle').setAttribute('aria-pressed', String(value));
+  $('#explosion-toggle small').textContent = value ? 'ON' : 'OFF';
+  $('#explosion-status').hidden = !value;
+  renderer.webgl.domElement.classList.toggle('explosion-cursor', value);
+}
+$('#explosion-toggle').addEventListener('click', () => setExplosionTesting(!explosionTesting));
 audio.reset(sim);
 let previousTime = 0, lastHudUpdate = -Infinity, hidden = document.hidden, frameHandle = 0;
 let simMs = 0, renderMs = 0, lastElapsed = 16.67, frames = 0, slowFrames = 0;
+let lastSimMs = 0, lastRenderMs = 0;
 const intervals = new Float32Array(360), samples: number[] = [];
 let intervalCursor = 0, intervalCount = 0;
 let droppedSimulationSeconds = 0;
 const capture = new PerformanceCapture(status => { $('#benchmark-status').textContent = status; $<HTMLButtonElement>('#benchmark-save').disabled = !capture.report; $('#benchmark-start').textContent = capture.active ? 'Stop benchmark' : 'Benchmark 500 vs 500 · 15 min'; });
+let simulationHz = 0, hzTime = 0, hzTicks = 0;
 const plutoCount = $('#pluto-count'), sectoidCount = $('#sectoid-count'), battleTime = $('#battle-time');
 const plutoStrength = $('#pluto-strength'), sectoidStrength = $('#sectoid-strength');
 const stateLabel = $('#state-label'), outcome = $('#outcome'), pauseButton = $('#pause');
@@ -120,6 +139,7 @@ function setPaused(value: boolean) {
   if (value) stopBenchmark('Benchmark stopped: battle paused.');
   paused = value; accumulator = 0;
   previousTime = 0;
+  explosionInput.cancel(); hzTime = hzTicks = simulationHz = 0;
   if (value) audio.stop();
   pauseButton.innerHTML = `${value ? icons.play : icons.pause}<span>${value ? 'Resume' : 'Pause'}</span>`;
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
@@ -137,6 +157,7 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   terrainSeed = nextTerrainSeed === undefined ? freshTerrainSeed() : nextTerrainSeed >>> 0;
   prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
+  setExplosionTesting(false);
   audio.reset(sim);
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
   previousTime = 0; droppedSimulationSeconds = 0;
@@ -169,11 +190,16 @@ function performanceSnapshot() {
     rayQueries: sim.terrain.rayQueries, rayCells: sim.terrain.rayCells,
     renderScale: renderer.resolutionScale, simulationTick: sim.tick, droppedSimulationSeconds,
     blockedUnits: sim.blockedUnits,
+    simulationHz, tick: sim.tick, airborne: sim.airborne, activeBodies: sim.activeBodies,
+    explosionCandidates: sim.explosionCandidates, collisionChecks: sim.collisionChecks,
+    explosions: sim.totalExplosions, activeExplosions: renderer.activeExplosions, overwrittenExplosionEffects: sim.explosions.overwritten,
   };
 }
 
 function updateHud() {
-  plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.time);
+  plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.battleTime);
+  $('#explosion-status').textContent = sim.result !== 'running' ? 'Battle ended · restart to test explosions' : paused ? 'Paused · resume to test explosions' : 'Click or tap ground to detonate · drag to pan';
+  if (paused || sim.result !== 'running') renderer.setExplosionPreview(null, tuning.explosionRadius);
   plutoStrength.style.width = `${Math.min(100, sim.alive[0] / perTeam * 100)}%`; sectoidStrength.style.width = `${Math.min(100, sim.alive[1] / perTeam * 100)}%`;
   stateLabel.innerHTML = `<i></i> ${sim.result !== 'running' ? 'BATTLE ENDED' : paused ? 'PAUSED' : 'LIVE BATTLE'}`;
   stateLabel.classList.toggle('is-paused', paused || sim.result !== 'running');
@@ -181,7 +207,7 @@ function updateHud() {
   if (sim.result !== 'running') {
     outcome.hidden = false;
     $('#outcome-title').textContent = sim.result === 'draw' ? 'Mutual destruction.' : sim.result === 'plutonians' ? 'Plutonians hold the field.' : 'Sectoids hold the field.';
-    $('#outcome-description').textContent = `${sim.alive[0] + sim.alive[1]} survivors · ${sim.totalShots.toLocaleString()} shots fired · ${elapsedLabel(sim.time)}`;
+    $('#outcome-description').textContent = `${sim.alive[0] + sim.alive[1]} survivors · ${sim.totalShots.toLocaleString()} shots fired · ${elapsedLabel(sim.battleTime)}`;
     $('#paused-notice').hidden = true;
   }
   const stats = performanceSnapshot(); $('#fps-label').textContent = stats.fps ? String(Math.round(stats.fps)) : '—';
@@ -193,6 +219,9 @@ function updateHud() {
       ['Draw calls / triangles', `${stats.drawCalls} / ${(stats.triangles / 1000).toFixed(1)}k`],
       ['Live units / effects', `${stats.live} / ${stats.activeEffects}`], ['Unit capacity', `${stats.capacity}`],
       ['Geometry / textures', `${stats.geometries} / ${stats.textures}`], ['Pixel ratio', `${stats.pixelRatio.toFixed(2)}×`],
+      ['Simulation rate', `${stats.simulationHz.toFixed(1)} Hz`], ['Airborne / moving bodies', `${stats.airborne} / ${stats.activeBodies}`],
+      ['Blast candidates / contacts', `${stats.explosionCandidates} / ${stats.collisionChecks}`],
+      ['Explosions / visible', `${stats.explosions} / ${stats.activeExplosions}`], ['Overwritten blast visuals', String(stats.overwrittenExplosionEffects)],
       ['Frames > 33.4 ms', `${stats.slowFrames} / ${stats.frames}`],
       ['Terrain seed', `${stats.terrainSeed}`], ['Terrain / navigation build', `${stats.terrainGenerationMs.toFixed(1)} / ${stats.navigationBuildMs.toFixed(1)} ms`],
       ['Navigation nodes / pending', `${stats.navigationExpansions} / ${stats.navigationPending}`],
@@ -264,6 +293,7 @@ document.addEventListener('keydown', event => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopBenchmark('Benchmark stopped: page hidden.');
   hidden = document.hidden; previousTime = 0; accumulator = 0;
+  explosionInput.cancel(); hzTime = hzTicks = simulationHz = 0;
   if (hidden) audio.stop();
 });
 
@@ -275,18 +305,23 @@ function frame(now: number) {
   if (elapsed > 0 && elapsed < 1) { intervals[intervalCursor++ % intervals.length] = elapsed * 1000; intervalCount = Math.min(intervalCount + 1, intervals.length); frames++; if (elapsed > 0.0334) slowFrames++; }
   const start = performance.now();
   if (capture.active) sim.weaponsEnabled = !capture.movementPhase;
-  if (!paused && sim.result === 'running') {
+  // After the result, bodies and blast effects keep settling while the battle clock stays fixed.
+  const advancing = sim.result === 'running' || sim.activeBodies > 0 || sim.time - sim.endedAt < CONFIG.corpseLifetime;
+  if (!paused && advancing) {
     droppedSimulationSeconds += Math.max(0, elapsed - 0.1);
     accumulator += Math.min(elapsed, 0.1);
     let steps = 0;
-    while (accumulator >= CONFIG.step && steps < 4) { sim.step(); accumulator -= CONFIG.step; steps++; }
+    while (accumulator >= CONFIG.step && steps < 4) { sim.step(); accumulator -= CONFIG.step; steps++; hzTicks++; }
     if (accumulator >= CONFIG.step) { const remaining = accumulator % CONFIG.step; droppedSimulationSeconds += accumulator - remaining; accumulator = remaining; }
+    hzTime += elapsed;
+    if (hzTime >= 1) { simulationHz = hzTicks / hzTime; hzTime = hzTicks = 0; }
   } else if (!paused) endAge += Math.min(elapsed, 0.1);
   const afterSim = performance.now();
   audio.update(sim, !paused);
   if (!paused) renderer.adapt(lastElapsed);
-  renderer.update(sim, paused || sim.result !== 'running' ? 1 : accumulator / CONFIG.step, sim.time + endAge);
-  simMs = simMs * 0.9 + (afterSim - start) * 0.1; renderMs = renderMs * 0.9 + (performance.now() - afterSim) * 0.1;
+  renderer.update(sim, paused || !advancing ? 1 : accumulator / CONFIG.step, sim.time + endAge);
+  lastSimMs = afterSim - start; lastRenderMs = performance.now() - afterSim;
+  simMs = simMs * 0.9 + lastSimMs * 0.1; renderMs = renderMs * 0.9 + lastRenderMs * 0.1;
   if (capture.active) {
     capture.sample(now, { simMs, renderMs, droppedSimulationSeconds, renderScale: renderer.resolutionScale, live: sim.alive[0] + sim.alive[1], simulationTick: sim.tick });
     if (!capture.active) { finishBenchmark(); setPaused(true); }
@@ -303,6 +338,8 @@ const api = {
   replay() { tuning = { ...sim.tuning }; return restart(undefined, seed, terrainSeed); },
   startBenchmark,
   get benchmark() { return { active: capture.active, report: capture.report }; },
+  get explosionTesting() { return explosionTesting; }, setExplosionTesting,
+  explode,
   get tuning() { return { ...tuning }; },
   get equipment() { return copyEquipment(equipment); },
   setEquipment(values: EquipmentSettings) {
@@ -310,7 +347,7 @@ const api = {
     equipment = copyEquipment(values); saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, tuning.count); return true;
   },
   performance: performanceSnapshot,
-  get timings() { return { simMs, renderMs }; },
+  get timings() { return { simMs, renderMs, lastSimMs, lastRenderMs }; },
   step(count = 1) {
     for (let i = 0; i < count; i++) sim.step();
     audio.update(sim, false);
@@ -319,6 +356,6 @@ const api = {
 };
 Object.assign(window, { __battle: api });
 updateHud(); frameHandle = requestAnimationFrame(frame);
-function dispose() { cancelAnimationFrame(frameHandle); audioEvents.abort(); audio.dispose(); renderer.dispose(); }
+function dispose() { cancelAnimationFrame(frameHandle); audioEvents.abort(); explosionInput.dispose(); audio.dispose(); renderer.dispose(); }
 window.addEventListener('pagehide', dispose, { once: true });
 if (import.meta.hot) import.meta.hot.dispose(dispose);

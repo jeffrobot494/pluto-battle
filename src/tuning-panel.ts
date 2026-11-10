@@ -12,7 +12,7 @@ export class TuningPanel {
     this.values = { ...values }; this.active = { ...values };
     const groups = [...new Set(TUNING.map(d => d.group))];
     host.insertAdjacentHTML('beforeend', `
-      <button id="tuning-toggle" class="tuning-toggle" aria-expanded="false" aria-controls="tuning-panel" title="Battle tuning (T)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 5h14M3 10h14M3 15h14"/><path d="M7 2v6m6-1v6m-5-1v6" stroke-width="3"/></svg><span>Tuning</span><small>25</small><span class="tuning-chevron">⌄</span></button>
+      <button id="tuning-toggle" class="tuning-toggle" aria-expanded="false" aria-controls="tuning-panel" title="Battle tuning (T)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 5h14M3 10h14M3 15h14"/><path d="M7 2v6m6-1v6m-5-1v6" stroke-width="3"/></svg><span>Tuning</span><small>${TUNING.length}</small><span class="tuning-chevron">⌄</span></button>
       <aside id="tuning-panel" hidden aria-label="Battle tuning">
         <div class="tuning-heading"><div>BATTLE TUNING<small>Shared by both armies</small></div><button id="close-tuning" aria-label="Collapse tuning panel">×</button></div>
         <div class="tuning-scroll">${groups.map(group => `<details class="tuning-group" open><summary>${group}<span>${TUNING.filter(d => d.group === group).length}</span></summary>${TUNING.filter(d => d.group === group).map(def => `

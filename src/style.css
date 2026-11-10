@@ -170,3 +170,10 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
   .equipment-percent input { min-height: 44px; font-size: 16px; }
 }
 @media (max-height: 640px) { #equipment-panel { top: 72px; bottom: 105px; } }
+.explosion-toggle { position: absolute; top: 183px; left: 296px; height: 33px; display: flex; align-items: center; gap: 7px; padding: 0 11px; background: #231c2cde; border: 1px solid #ffffff36; border-radius: 4px; font-size: 10px; backdrop-filter: blur(12px); }
+.explosion-toggle > span { font-size: 18px; color: #ffd184; }.explosion-toggle small { color: #b8a7bb; font: 8px Consolas, monospace; }.explosion-toggle[aria-pressed="true"] { color: #ffe0a6; border-color: #ffc575; background: #503322e8; }.explosion-toggle[aria-pressed="true"] small { color: #ffd184; }
+.explosion-status { position: absolute; top: 219px; left: 296px; margin: 4px 0 0; max-width: calc(100% - 318px); color: #ffdaa2; font: 9px "Segoe UI", sans-serif; pointer-events: none; text-shadow: 0 1px 5px #201521; }
+.explosion-cursor { cursor: crosshair; }
+@media (max-width: 900px) { .explosion-toggle { left: 284px; }.explosion-status { left: 284px; max-width: calc(100% - 306px); } }
+@media (max-width: 600px) { .explosion-toggle { top: 219px; left: 19px; height: 31px; }.explosion-status { top: 252px; left: 19px; max-width: calc(100% - 38px); font-size: 9px; } }
+@media (max-height: 560px) and (min-width: 601px) { .explosion-toggle { top: 120px; }.explosion-status { top: 156px; } }

@@ -4,32 +4,17 @@ import { ARMY_ITEMS, copyEquipment, defaultEquipment, recipientCount, validateEq
 import { random } from './random.ts';
 import { Terrain } from './terrain.ts';
 import { Navigation } from './navigation.ts';
+import { rayCapsule, raySegmentCapsule } from './collision.ts';
+import { ExplosionEvents, validExplosion, type Explosion } from './explosions.ts';
 export { random } from './random.ts';
+export { rayCapsule } from './collision.ts';
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
 export type Command =
   | { type: 'spawn'; team: Team; x: number; z: number; weapon?: number }
-  | { type: 'equip'; ids: readonly number[]; weapon: number };
-
-/** First 3D ray/capsule contact. Capsules stand upright on their support surface. */
-export function rayCapsule(x: number, y: number, z: number, dx: number, dy: number, dz: number, cx: number, base: number, cz: number, radius: number) {
-  const ox = x - cx, oz = z - cz, a = dx * dx + dz * dz, b = ox * dx + oz * dz;
-  const lower = base + radius, upper = base + CONFIG.soldier.height - radius;
-  const oy = y - Math.max(lower, Math.min(upper, y));
-  if (ox * ox + oy * oy + oz * oz <= radius * radius) return 0;
-  let result = Infinity;
-  if (a > 1e-10) {
-    const disc = b * b - a * (ox * ox + oz * oz - radius * radius);
-    if (disc >= 0) { const t = (-b - Math.sqrt(disc)) / a, h = y + dy * t - base; if (t >= 0 && h >= radius && h <= CONFIG.soldier.height - radius) result = t; }
-  }
-  for (let end = 0; end < 2; end++) {
-    const oy = y - base - (end ? CONFIG.soldier.height - radius : radius), dot = ox * dx + oy * dy + oz * dz;
-    const disc = dot * dot - (ox * ox + oy * oy + oz * oz - radius * radius);
-    if (disc >= 0) { const t = -dot - Math.sqrt(disc); if (t >= 0) result = Math.min(result, t); }
-  }
-  return result;
-}
+  | { type: 'equip'; ids: readonly number[]; weapon: number }
+  | ({ type: 'explode' } & Explosion);
 
 /** First distance along a unit direction to a circle. */
 export function rayCircle(x: number, z: number, dx: number, dz: number, cx: number, cz: number, radius: number): number {
@@ -145,6 +130,10 @@ export class BattleSimulation {
   private readonly nextRetarget: Float64Array;
   private readonly detourCos = new Float64Array(6);
   private readonly detourSin = new Float64Array(6);
+  readonly velocityX: Float64Array;
+  readonly velocityY: Float64Array;
+  readonly velocityZ: Float64Array;
+  readonly grounded: Uint8Array;
   readonly previousX: Float64Array;
   readonly previousZ: Float64Array;
   readonly hp: Float32Array;
@@ -171,6 +160,7 @@ export class BattleSimulation {
   readonly grid: SpatialGrid;
   readonly shots = new ShotEvents();
   readonly events = new CombatEvents();
+  readonly explosions = new ExplosionEvents();
   readonly alive = new Uint16Array(2);
   readonly rng: () => number;
   private readonly steeringRng: () => number;
@@ -185,6 +175,14 @@ export class BattleSimulation {
   result: Outcome = 'running';
   weaponsEnabled = true;
   rejectedSpawns = 0;
+  rejectedExplosions = 0;
+  totalExplosions = 0;
+  explosionCandidates = 0;
+  collisionChecks = 0;
+  activeBodies = 0;
+  airborne = 0;
+  endedAt = Infinity;
+  get battleTime() { return Math.min(this.time, this.endedAt); }
   // Shared query scratch: all queries are synchronous.
   private nearestSlot = -1;
   private nearestDistance = Infinity;
@@ -208,6 +206,8 @@ export class BattleSimulation {
     this.avoidanceX = new Float64Array(capacity); this.avoidanceZ = new Float64Array(capacity); this.nextRetarget = new Float64Array(capacity);
     this.updateDetourAngles();
     this.x = new Float64Array(capacity); this.z = new Float64Array(capacity);
+    this.velocityX = new Float64Array(capacity); this.velocityY = new Float64Array(capacity); this.velocityZ = new Float64Array(capacity);
+    this.grounded = new Uint8Array(capacity);
     this.previousX = new Float64Array(capacity); this.previousZ = new Float64Array(capacity);
     this.hp = new Float32Array(capacity); this.radius = new Float32Array(capacity);
     this.team = new Uint8Array(capacity); this.weapon = new Uint8Array(capacity);
@@ -312,6 +312,7 @@ export class BattleSimulation {
     this.x[slot] = this.previousX[slot] = x; this.z[slot] = this.previousZ[slot] = z;
     this.y[slot] = this.previousY[slot] = this.terrain.heightAt(x, z); this.visible[slot] = 0; this.aimPitch[slot] = 0; this.lastProgress[slot] = this.time;
     this.avoidanceX[slot] = this.avoidanceZ[slot] = this.nextRetarget[slot] = 0;
+    this.velocityX[slot] = this.velocityY[slot] = this.velocityZ[slot] = 0; this.grounded[slot] = 1;
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
     this.team[slot] = team; this.weapon[slot] = weapon; this.inventory[slot] = 1 << weapon; this.target[slot] = 0; this.moving[slot] = 0;
@@ -321,6 +322,7 @@ export class BattleSimulation {
     this.nextSearch[slot] = this.time + this.rng() * this.tuning.initialSearchDelay;
     this.grid.insert(slot, x, z); this.alive[team]++;
     this.result = 'running';
+    this.endedAt = Infinity;
     return id;
   }
 
@@ -333,8 +335,10 @@ export class BattleSimulation {
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
       for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
         if (j === ignore) continue;
+        const base = ignore >= 0 ? this.y[ignore] : this.terrain.heightAt(x, z);
+        const verticalGap = Math.max(0, Math.abs(base - this.y[j]) - (CONFIG.soldier.height - radius - this.radius[j]));
         const dx = x - this.x[j], dz = z - this.z[j], minimum = radius + this.radius[j] + 0.001;
-        if (dx * dx + dz * dz < minimum * minimum - 1e-10) return false;
+        if (dx * dx + dz * dz + verticalGap * verticalGap < minimum * minimum - 1e-10) return false;
       }
     }
     return true;
@@ -354,6 +358,13 @@ export class BattleSimulation {
         if (j === i) continue;
         const minimum = r + this.radius[j] + 0.001;
         if (Math.abs(this.x[j] - midX) > minimum + halfX || Math.abs(this.z[j] - midZ) > minimum + halfZ) continue;
+        if (!this.grounded[j]) {
+          // Airborne bodies block only where their upright capsule overlaps the walker's.
+          if (Math.abs(this.y[i] - this.y[j]) >= CONFIG.soldier.height + 0.002) continue;
+          const axial = CONFIG.soldier.height - r - this.radius[j];
+          if (raySegmentCapsule(ox, this.y[i], oz, ux, 0, uz, this.x[j], this.y[j] - axial, this.y[j] + axial, this.z[j], minimum) < length + 1e-9) return false;
+          continue;
+        }
         const jx = this.x[j] - ox, jz = this.z[j] - oz, along = Math.max(0, Math.min(length, jx * ux + jz * uz));
         const cx = jx - ux * along, cz = jz - uz * along;
         if (cx * cx + cz * cz < minimum * minimum - 1e-10) return false;
@@ -381,12 +392,13 @@ export class BattleSimulation {
   private nearest(i: number, radius: number): number {
     this.nearestSlot = -1; this.nearestDistance = radius * radius;
     this.nearestVisible = false; this.candidates.fill(-1); this.candidateDistances.fill(radius * radius);
+    const grid = this.grid;
     const x = this.x[i], z = this.z[i];
-    const minX = this.grid.column(x - radius), maxX = this.grid.column(x + radius);
-    const minZ = this.grid.row(z - radius), maxZ = this.grid.row(z + radius);
+    const minX = grid.column(x - radius), maxX = grid.column(x + radius);
+    const minZ = grid.row(z - radius), maxZ = grid.row(z + radius);
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
-      if (!this.grid.teamCounts[1 - this.team[i]][cz * this.grid.columns + cx]) continue;
-      for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
+      if (!grid.teamCounts[1 - this.team[i]][cz * grid.columns + cx]) continue;
+      for (let j = grid.heads[cz * grid.columns + cx]; j >= 0; j = grid.next[j]) {
         if (this.team[j] === this.team[i]) continue;
         const dx = this.x[j] - x, dz = this.z[j] - z, dy = this.y[j] - this.y[i], d = dx * dx + dz * dz + dy * dy;
         if (d < this.nearestDistance) { this.nearestDistance = d; this.nearestSlot = j; }
@@ -478,17 +490,123 @@ export class BattleSimulation {
     nav.advance(1024);
   }
 
+  /** Positions stay unchanged while commands accumulate, so simultaneous blasts add. Infantry mass = 1. */
+  private explode(e: Explosion) {
+    if (!validExplosion(e)) { this.rejectedExplosions++; return; }
+    const minX = this.grid.column(e.x - e.radius), maxX = this.grid.column(e.x + e.radius);
+    const minZ = this.grid.row(e.z - e.radius), maxZ = this.grid.row(e.z + e.radius);
+    for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
+      for (let i = this.grid.heads[row * this.grid.columns + col]; i >= 0; i = this.grid.next[i]) this.blastBody(i, e);
+    }
+    // Corpses leave the combat grid immediately but retain their bounded physical lifetime.
+    for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && this.time - this.diedAt[i] < CONFIG.corpseLifetime) this.blastBody(i, e);
+    this.explosions.emit(e, this.time); this.totalExplosions++;
+  }
+
+  private blastBody(i: number, e: Explosion) {
+    this.explosionCandidates++;
+    const dx = this.x[i] - e.x, dy = this.y[i] + CONFIG.soldier.height / 2 - e.y, dz = this.z[i] - e.z;
+    const d = Math.hypot(dx, dy, dz);
+    if (d > e.radius) return;
+    if (this.hp[i] > 0) this.pendingDamage[i] += e.damage;
+    const impulse = e.impulse * Math.max(0, 1 - d / e.radius);
+    if (d > 1e-9) { this.velocityX[i] += dx / d * impulse; this.velocityY[i] += dy / d * impulse; this.velocityZ[i] += dz / d * impulse; }
+    else this.velocityY[i] += impulse;
+  }
+
+  /** Swept upright capsules: their Minkowski sum is another vertical capsule. */
+  private moveBody(i: number) {
+    let remaining = CONFIG.step;
+    const r = this.radius[i], height = CONFIG.soldier.height;
+    for (let attempt = 0; attempt < CONFIG.physics.contactIterations && remaining > 1e-8; attempt++) {
+      const vx = this.velocityX[i], vy = this.velocityY[i], vz = this.velocityZ[i], speed = Math.hypot(vx, vy, vz);
+      if (speed < 1e-8) break;
+      const dx = vx / speed, dy = vy / speed, dz = vz / speed, length = speed * remaining;
+      const x = this.x[i], y = this.y[i], z = this.z[i];
+      let distance = length, nx = 0, ny = 0, nz = 0;
+      const support = this.terrain.heightAt(x, z);
+      if (dy < 0) { const t = Math.max(0, (support - y) / dy); if (t <= distance) { distance = t; ny = 1; } }
+      const boundX = this.grid.halfWidth - r, boundZ = this.grid.halfDepth - r;
+      if (Math.abs(dx) > 1e-12) { const t = Math.max(0, ((dx > 0 ? boundX : -boundX) - x) / dx); if (t <= distance) { distance = t; nx = dx > 0 ? -1 : 1; ny = nz = 0; } }
+      if (Math.abs(dz) > 1e-12) { const t = Math.max(0, ((dz > 0 ? boundZ : -boundZ) - z) / dz); if (t <= distance) { distance = t; nz = dz > 0 ? -1 : 1; nx = ny = 0; } }
+      // Rocks and unwalkable slopes act as walls, so landed soldiers always stay on navigable ground.
+      if (this.navigation && (dx || dz) && !this.terrain.canStand(x + dx * distance, z + dz * distance, r)) {
+        this.velocityX[i] = this.velocityZ[i] = 0;
+        continue;
+      }
+      if (this.hp[i] > 0) {
+        const reach = r + this.tuning.radius + 0.002, ex = x + dx * distance, ez = z + dz * distance;
+        const minX = this.grid.column(Math.min(x, ex) - reach), maxX = this.grid.column(Math.max(x, ex) + reach);
+        const minZ = this.grid.row(Math.min(z, ez) - reach), maxZ = this.grid.row(Math.max(z, ez) + reach);
+        for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
+          for (let j = this.grid.heads[row * this.grid.columns + col]; j >= 0; j = this.grid.next[j]) {
+            if (j === i) continue;
+            this.collisionChecks++;
+            const axial = height - r - this.radius[j], radius = r + this.radius[j] + 0.001;
+            const low = this.y[j] - axial, high = this.y[j] + axial;
+            const ox = x - this.x[j], oy = y - Math.max(low, Math.min(high, y)), oz = z - this.z[j];
+            // A touching body can move away or tangent; it must not glue to its neighbor.
+            if (ox * ox + oy * oy + oz * oz <= (radius + 1e-6) ** 2 && ox * dx + oy * dy + oz * dz >= -1e-9) continue;
+            const t = raySegmentCapsule(x, y, z, dx, dy, dz, this.x[j], low, high, this.z[j], radius);
+            if (t > distance) continue;
+            const tx = x + dx * t - this.x[j], ty = y + dy * t - Math.max(low, Math.min(high, y + dy * t)), tz = z + dz * t - this.z[j];
+            const norm = Math.hypot(tx, ty, tz);
+            if (norm < 1e-9) continue;
+            distance = t; nx = tx / norm; ny = ty / norm; nz = tz / norm;
+          }
+        }
+      }
+      const travel = Math.max(0, distance - (nx || ny || nz ? 1e-6 : 0));
+      this.x[i] += dx * travel; this.y[i] += dy * travel; this.z[i] += dz * travel;
+      if (this.hp[i] > 0) this.grid.insert(i, this.x[i], this.z[i]);
+      if (!(nx || ny || nz)) break;
+      remaining *= Math.max(0, 1 - distance / length);
+      const inward = vx * nx + vy * ny + vz * nz;
+      if (inward >= 0) break;
+      this.velocityX[i] -= inward * nx; this.velocityY[i] -= inward * ny; this.velocityZ[i] -= inward * nz;
+      // Let a perfectly centered head landing slide off instead of balancing forever.
+      if (ny > 0.5 && y > support + 0.01 && Math.hypot(this.velocityX[i], this.velocityZ[i]) < 0.01) this.velocityX[i] += this.detourSide[i] * 0.25;
+    }
+  }
+
+  private integrateBodies() {
+    this.activeBodies = this.airborne = 0;
+    for (let n = 0; n < this.used; n++) {
+      const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
+      if (this.hp[i] <= 0 && this.time - this.diedAt[i] >= CONFIG.corpseLifetime) continue;
+      const ground = this.terrain.heightAt(this.x[i], this.z[i]);
+      if (this.y[i] <= ground + 1e-5 && this.velocityY[i] <= 0) { this.y[i] = ground; this.velocityY[i] = 0; this.grounded[i] = 1; }
+      else { this.grounded[i] = 0; this.velocityY[i] -= this.tuning.gravity * CONFIG.step; }
+      if (this.velocityX[i] || this.velocityY[i] || this.velocityZ[i] || !this.grounded[i]) {
+        this.activeBodies++; this.moveBody(i);
+        const support = this.terrain.heightAt(this.x[i], this.z[i]);
+        // Rising terrain lifts a sliding or falling body onto the surface.
+        if (this.y[i] <= support + 1e-5 && this.velocityY[i] <= 0) { this.y[i] = support; this.velocityY[i] = 0; this.grounded[i] = 1; }
+        else if (this.y[i] < support) this.y[i] = support;
+        if (this.grounded[i]) {
+          const speed = Math.hypot(this.velocityX[i], this.velocityZ[i]);
+          const scale = speed > 0 ? Math.max(0, 1 - CONFIG.physics.friction * CONFIG.step / speed) : 0;
+          this.velocityX[i] *= scale; this.velocityZ[i] *= scale;
+        }
+        if (this.hp[i] > 0) this.lastProgress[i] = this.time;
+      }
+      if (!this.grounded[i]) this.airborne++;
+    }
+  }
+
   step() {
-    this.applyCommands();
-    if (this.result !== 'running') return;
+    this.pendingDamage.fill(0, 0, this.used);
+    this.explosionCandidates = this.collisionChecks = 0;
     this.time += CONFIG.step; this.tick++;
     this.updateNavigation();
     this.centerX.fill(0); this.centerZ.fill(0);
     for (let i = 0; i < this.used; i++) {
-      this.previousX[i] = this.x[i]; this.previousZ[i] = this.z[i]; this.moving[i] = 0;
-      this.previousY[i] = this.y[i];
+      this.previousX[i] = this.x[i]; this.previousY[i] = this.y[i]; this.previousZ[i] = this.z[i]; this.moving[i] = 0;
       if (this.hp[i] > 0) { this.centerX[this.team[i]] += this.x[i]; this.centerZ[this.team[i]] += this.z[i]; }
     }
+    this.applyCommands();
+    this.integrateBodies();
+    if (this.result !== 'running') return;
     for (let team = 0; team < 2; team++) if (this.alive[team]) { this.centerX[team] /= this.alive[team]; this.centerZ[team] /= this.alive[team]; }
     // Alternate direction and rotate priority to avoid a permanent first-mover advantage.
     for (let n = 0; n < this.used; n++) {
@@ -518,6 +636,8 @@ export class BattleSimulation {
       this.weapon[i] = this.selectWeapon(i, reach);
       const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
+      // Airborne soldiers can still aim and fire, but cannot walk until they land.
+      if (!this.grounded[i]) continue;
       const engage = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
       if (this.weaponsEnabled && engage) continue;
       if (d < 0.001 || !this.alive[1 - this.team[i]]) continue;
@@ -537,6 +657,7 @@ export class BattleSimulation {
         for (let row = minZ; row <= maxZ; row++) for (let column = minX; column <= maxX; column++) {
           for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
             if (j === i) continue;
+            if (!this.grounded[j] && Math.abs(this.y[i] - this.y[j]) >= CONFIG.soldier.height) continue;
             const ox = this.x[i] - this.x[j], oz = this.z[i] - this.z[j], dd = Math.hypot(ox, oz);
             if (dd > 1e-6 && dd < reach) { const force = (reach - dd) / reach * this.tuning.avoidanceStrength; separationX += ox / dd * force; separationZ += oz / dd * force; }
           }
@@ -557,7 +678,6 @@ export class BattleSimulation {
       }
       if (moved) this.moving[i] = 1;
     }
-    this.pendingDamage.fill(0, 0, this.used);
     if (this.weaponsEnabled) for (let i = 0; i < this.used; i++) {
       if (this.hp[i] <= 0) continue;
       const target = this.byId.get(this.target[i]);
@@ -573,12 +693,13 @@ export class BattleSimulation {
       this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
     }
     for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) this.damage(this.id[i], this.pendingDamage[i]);
-    if (!this.alive[0] || !this.alive[1]) this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids';
+    if (!this.alive[0] || !this.alive[1]) { this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids'; this.endedAt = this.time; }
   }
 
   private applyCommands() {
     for (const command of this.commands) {
       if (command.type === 'spawn') { if (this.spawn(command.team, command.x, command.z, command.weapon) === null) this.rejectedSpawns++; }
+      else if (command.type === 'explode') { if (this.result === 'running') this.explode(command); }
       else if (WEAPONS[command.weapon]) for (const id of command.ids) {
         const i = this.byId.get(id);
         if (i !== undefined && this.hp[i] > 0) { this.inventory[i] = 1 << command.weapon; this.weapon[i] = command.weapon; }

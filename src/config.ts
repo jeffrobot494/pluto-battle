@@ -8,6 +8,8 @@ export const CONFIG = {
   hit: { duration: 0.12, intensity: 1 },
   corpseLifetime: 1.8,
   maxEffects: 768,
+  physics: { gravity: 9.81, friction: 8, contactIterations: 4 },
+  explosion: { radius: 4, damage: 35, impulse: 10, maxRadius: 20, effects: 32, duration: 0.45 },
 } as const;
 
 export interface Weapon {
