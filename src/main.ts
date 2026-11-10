@@ -9,6 +9,7 @@ import { BattleAudio, SOUND_EFFECTS } from './audio.ts';
 import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from './equipment.ts';
 import { EquipmentPanel } from './equipment-panel.ts';
 import { prepareTerrain } from './navigation.ts';
+import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
 import { ExplosionInput, type GroundPoint } from './explosion-input.ts';
 
@@ -16,6 +17,7 @@ const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
   play: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="m6 3 11 7-11 7z"/></svg>',
   restart: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4.6 5a7 7 0 1 1-1.3 7M4 1v5h5"/></svg>',
+  map: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m2 15 5-9 3 5 2-3 6 7z"/><circle cx="14.5" cy="4.5" r="1.6"/></svg>',
   focus: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4"/><circle cx="10" cy="10" r="2.5"/></svg>',
   stats: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 14h3l3-9 4 12 3-8h3"/></svg>',
   sound: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 8h3l4-4v12l-4-4H3zM13 7a5 5 0 0 1 0 6m3-9a9 9 0 0 1 0 12"/></svg>',
@@ -26,7 +28,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <div id="viewport"></div><div class="vignette" aria-hidden="true"></div>
     <header class="top-bar">
       <div class="brand"><span class="planet-mark" aria-hidden="true"></span><h1>PLUTO<span>MASS COMBAT</span></h1><span class="prototype-label">PROTOTYPE 001</span></div>
-      <div class="sector"><span class="sector-cross" aria-hidden="true">✣</span><div>VERMILION BASIN<small>OUTER RIM · SECTOR 07</small></div></div>
+      <div class="sector"><span class="sector-cross" aria-hidden="true">✣</span><div><span id="map-name">TEST RANGE</span><small id="map-region">FLAT FIXTURE</small></div></div>
     </header>
     <section class="army-hud" aria-label="Army status">
       <div class="army plutonians"><div class="army-label"><span class="team-symbol">Ⅰ</span><div>PLUTONIANS<small>EXPEDITIONARY CORPS</small></div></div><div class="army-count"><strong id="pluto-count">100</strong><span>ACTIVE</span></div><div class="strength-track"><div id="pluto-strength"></div></div></div>
@@ -35,16 +37,16 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </section>
     <div class="field-label" aria-hidden="true"><span class="coordinate-line"></span><span>07 / ALIEN SURFACE</span><small>NO ORDERS REQUIRED.</small></div>
     <div class="view-controls" aria-label="Camera controls"><button id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><span></span><button id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button></div>
-    <section id="outcome" class="outcome" hidden aria-live="polite"><span>ENGAGEMENT COMPLETE</span><h2 id="outcome-title"></h2><p id="outcome-description"></p><button id="play-again">Run another battle <span>↗</span></button></section>
+    <section id="outcome" class="outcome" hidden aria-live="polite"><span>ENGAGEMENT COMPLETE</span><h2 id="outcome-title"></h2><p id="outcome-description"></p><button id="play-again">New battle, new map <span>↗</span></button></section>
     <div id="paused-notice" class="paused-notice" hidden>SIMULATION PAUSED</div>
     <button id="explosion-toggle" class="explosion-toggle" aria-pressed="false" aria-describedby="explosion-status"><span aria-hidden="true">✳</span> Test explosions <small>OFF</small></button>
     <p id="explosion-status" class="explosion-status" role="status" hidden>Click or tap ground to detonate · drag to pan</p>
     <footer class="bottom-bar">
       <div class="battle-note"><span class="status-light"></span><div id="engagement-label">ARMIES ADVANCING<small>100 vs 100 · AUTOMATIC ENGAGEMENT</small></div></div>
-      <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart">${icons.restart}<span>Restart</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
+      <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart" title="Restart on this map (R)">${icons.restart}<span>Restart</span></button><button id="new-map" title="New battle on a new map (N)">${icons.map}<span>New map</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
       <button id="diagnostics-toggle" class="performance-badge" aria-expanded="false" aria-controls="diagnostics" title="Performance and battle settings (D)">${icons.stats}<strong id="fps-label">—</strong><span>FPS</span></button>
     </footer>
-    <div class="input-hint">LEFT-DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> SPACE PAUSE</div>
+    <div class="input-hint">LEFT-DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> SPACE PAUSE <span>·</span> N NEW MAP</div>
     <details id="sound-panel" class="sound-panel">
       <summary>${icons.sound}<span>Sound effects</span><span id="sound-state">TAP TO ENABLE</span><span class="sound-chevron" aria-hidden="true">⌃</span></summary>
       <div class="sound-settings">
@@ -57,7 +59,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="panel-heading"><span>FIELD DIAGNOSTICS</span><button id="close-diagnostics" aria-label="Close diagnostics">×</button></div>
       <dl id="metrics"></dl>
       <div class="settings"><label for="deployment">Deployment preset <select id="deployment"><option value="custom" disabled>Custom · tuning panel</option><option value="100">100 vs 100</option><option value="250">250 vs 250</option><option value="500">500 vs 500</option></select></label><label for="quality">Visual quality <select id="quality"><option value="balanced">Adaptive · up to 1.5× pixels</option><option value="low">Low · up to 1× pixels</option></select></label><button id="apply-battle">Deploy preset ${icons.restart}</button></div>
-      <p>Every restart explores new terrain. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
+      <p>Restart replays this map; New map (N) rolls a different landscape. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
       <div class="settings"><button id="benchmark-start">Benchmark 500 vs 500 · 15 min</button><button id="benchmark-save" disabled>Save benchmark report</button></div>
       <p id="benchmark-status" role="status">5-minute warmup, then 10-minute recording. Keep the page visible.</p>
     </aside>
@@ -100,8 +102,18 @@ let perTeam = tuning.count, seed = tuning.seed;
 const parameters = new URLSearchParams(location.search);
 const flatFixture = parameters.get('flat') === '1';
 function freshTerrainSeed() { return crypto.getRandomValues(new Uint32Array(1))[0]; }
+// `?map=<archetype>` pins every battle to one landscape type.
+const forcedArchetype = archetypeById(parameters.get('map') ?? '')?.id;
+/** A fresh seed whose landscape type differs from the current one, so rerolls always look new. */
+function freshMapSeed() {
+  const current = prepared?.terrain.archetype;
+  let next = freshTerrainSeed();
+  for (let i = 0; !forcedArchetype && i < 24 && pickArchetype(next).id === current; i++) next = freshTerrainSeed();
+  return next;
+}
 let terrainSeed = parameters.has('terrain') ? Number(parameters.get('terrain')) >>> 0 : freshTerrainSeed();
-let prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
+let prepared: ReturnType<typeof prepareTerrain> | null = null;
+prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
 let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
 let explosionTesting = false;
 const explosionInput = new ExplosionInput(renderer.webgl.domElement, () => !paused && !document.hidden && sim.result === 'running',
@@ -117,7 +129,7 @@ function setExplosionTesting(value: boolean) {
   renderer.webgl.domElement.classList.toggle('explosion-cursor', value);
 }
 $('#explosion-toggle').addEventListener('click', () => setExplosionTesting(!explosionTesting));
-audio.reset(sim);
+audio.reset(sim); updateMapLabel();
 let previousTime = 0, lastHudUpdate = -Infinity, hidden = document.hidden, frameHandle = 0;
 let simMs = 0, renderMs = 0, lastElapsed = 16.67, frames = 0, slowFrames = 0;
 let lastSimMs = 0, lastRenderMs = 0;
@@ -154,11 +166,12 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   tuning = candidate;
   if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); equipmentPanel.toggle(false); tuningPanel.toggle(true); return false; }
   perTeam = tuning.count; seed = tuning.seed;
-  terrainSeed = nextTerrainSeed === undefined ? freshTerrainSeed() : nextTerrainSeed >>> 0;
-  prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed);
+  terrainSeed = nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
+  prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
   setExplosionTesting(false);
   audio.reset(sim);
+  updateMapLabel();
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
   previousTime = 0; droppedSimulationSeconds = 0;
   saveTuning(tuning); tuningPanel.sync(tuning, sim.tuning);
@@ -166,6 +179,15 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
   outcome.hidden = true; setPaused(false); updateHud();
   return true;
+}
+/** Same map, fresh battle. */
+const restartMap = () => restart(undefined, undefined, terrainSeed);
+/** New battle on a different landscape. */
+const newMap = () => restart();
+function updateMapLabel() {
+  const t = sim.terrain, holder = t.defender === 0 ? 'PLUTONIANS HOLD THE HEIGHTS' : t.defender === 1 ? 'SECTOIDS HOLD THE HEIGHTS' : '';
+  $('#map-name').textContent = t.name.toUpperCase();
+  $('#map-region').textContent = [t.region.toUpperCase(), holder].filter(Boolean).join(' · ');
 }
 function elapsedLabel(seconds: number) { return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`; }
 
@@ -184,7 +206,7 @@ function performanceSnapshot() {
     textures: renderer.webgl.info.memory.textures,
     live: sim.alive[0] + sim.alive[1], capacity: sim.capacity,
     pixelRatio: renderer.webgl.getPixelRatio(), lastElapsed,
-    terrainSeed, terrainGenerationMs: sim.terrain.generationMs, terrainRepairs: sim.terrain.repairs,
+    terrainSeed, terrainArchetype: sim.terrain.archetype, terrainRamps: sim.terrain.ramps.length, terrainGenerationMs: sim.terrain.generationMs, terrainRepairs: sim.terrain.repairs,
     navigationBuildMs: sim.navigation?.buildMs ?? 0, navigationExpansions: sim.navigation?.expansions ?? 0,
     navigationPending: sim.navigation?.fields.filter(f => f.building).length ?? 0,
     rayQueries: sim.terrain.rayQueries, rayCells: sim.terrain.rayCells,
@@ -223,7 +245,7 @@ function updateHud() {
       ['Blast candidates / contacts', `${stats.explosionCandidates} / ${stats.collisionChecks}`],
       ['Explosions / visible', `${stats.explosions} / ${stats.activeExplosions}`], ['Overwritten blast visuals', String(stats.overwrittenExplosionEffects)],
       ['Frames > 33.4 ms', `${stats.slowFrames} / ${stats.frames}`],
-      ['Terrain seed', `${stats.terrainSeed}`], ['Terrain / navigation build', `${stats.terrainGenerationMs.toFixed(1)} / ${stats.navigationBuildMs.toFixed(1)} ms`],
+      ['Terrain seed / map', `${stats.terrainSeed} / ${stats.terrainArchetype}`], ['Ramps / repairs', `${stats.terrainRamps} / ${stats.terrainRepairs}`], ['Terrain / navigation build', `${stats.terrainGenerationMs.toFixed(1)} / ${stats.navigationBuildMs.toFixed(1)} ms`],
       ['Navigation nodes / pending', `${stats.navigationExpansions} / ${stats.navigationPending}`],
       ['Render scale / lost sim time', `${Math.round(stats.renderScale * 100)}% / ${stats.droppedSimulationSeconds.toFixed(2)}s`],
       ['Blocked > 2 seconds', `${stats.blockedUnits}`],
@@ -233,8 +255,9 @@ function updateHud() {
 }
 
 $('#pause').addEventListener('click', () => setPaused(!paused));
-$('#restart').addEventListener('click', () => restart());
-$('#play-again').addEventListener('click', () => restart());
+$('#restart').addEventListener('click', () => restartMap());
+$('#new-map').addEventListener('click', () => newMap());
+$('#play-again').addEventListener('click', () => newMap());
 $('#center').addEventListener('click', () => renderer.resetCamera());
 $('#zoom-in').addEventListener('click', () => renderer.zoom(1.2));
 $('#zoom-out').addEventListener('click', () => renderer.zoom(1 / 1.2));
@@ -265,15 +288,15 @@ $('#benchmark-save').addEventListener('click', () => {
 });
 $('#apply-battle').addEventListener('click', () => {
   const count = Number($<HTMLSelectElement>('#deployment').value);
-  if (Number.isFinite(count)) restart(count);
+  if (Number.isFinite(count)) restart(count, undefined, terrainSeed);
 });
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
   stopBenchmark('Benchmark stopped: tuning changed.');
   tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentPanel?.updateCount(tuning.count); equipmentPanel?.updateRifle(sim.rifle); updateHud();
-}, () => restart());
+}, () => restartMap());
 equipmentPanel = new EquipmentPanel($('#battle-app'), equipment, tuning.count, values => {
   equipment = values; saveEquipment(equipment);
-}, () => restart());
+}, () => restartMap());
 equipmentPanel.updateRifle(sim.rifle);
 function openTuning() { tuningPanel.toggle(); if (!tuningPanel.element.hidden) { soundPanel.open = false; equipmentPanel.toggle(false); toggleDiagnostics(false); } }
 function openEquipment() { equipmentPanel.toggle(); if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } }
@@ -283,7 +306,8 @@ $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? 
 document.addEventListener('keydown', event => {
   if (event.target instanceof Element && event.target.closest('input, select, button, summary')) return;
   if (event.code === 'Space') { event.preventDefault(); setPaused(!paused); }
-  if (event.code === 'KeyR') restart();
+  if (event.code === 'KeyR') restartMap();
+  if (event.code === 'KeyN') newMap();
   if (event.code === 'KeyD') toggleDiagnostics();
   if (event.code === 'KeyT') openTuning();
   if (event.code === 'KeyE') openEquipment();
@@ -334,7 +358,8 @@ const api = {
   ready: true,
   get sim() { return sim; }, renderer, audio,
   get paused() { return paused; }, setPaused, restart,
-  get terrainSeed() { return terrainSeed; },
+  get terrainSeed() { return terrainSeed; }, restartMap, newMap,
+  get map() { const t = sim.terrain; return { archetype: t.archetype, name: t.name, region: t.region, defender: t.defender, repairs: t.repairs, ramps: t.ramps.length }; },
   replay() { tuning = { ...sim.tuning }; return restart(undefined, seed, terrainSeed); },
   startBenchmark,
   get benchmark() { return { active: capture.active, report: capture.report }; },

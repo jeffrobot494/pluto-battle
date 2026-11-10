@@ -4,7 +4,7 @@ import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID } from './config.ts';
 import { BattleSimulation } from './simulation.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
 import { Terrain } from './terrain.ts';
-import { addTerrainWorld } from './terrain-renderer.ts';
+import { addTerrainWorld, paletteOf } from './terrain-renderer.ts';
 import type { GroundPoint } from './explosion-input.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
@@ -65,8 +65,8 @@ export class BattleRenderer {
     host.append(this.webgl.domElement);
     this.scene.background = new THREE.Color('#9a7886');
     this.scene.fog = new THREE.Fog('#9a7886', 95, 185);
-    this.scene.add(new THREE.HemisphereLight('#e5d8f5', '#68313b', 2.3));
-    const sun = new THREE.DirectionalLight('#ffd8b9', 3.0); sun.position.set(-25, 50, 10); this.scene.add(sun);
+    this.hemi = new THREE.HemisphereLight('#e5d8f5', '#68313b', 2.3); this.scene.add(this.hemi);
+    this.sun = new THREE.DirectionalLight('#ffd8b9', 3.0); this.sun.position.set(-25, 50, 10); this.scene.add(this.sun);
     const rim = new THREE.DirectionalLight('#b7a0ff', 1.9); rim.position.set(25, 20, -35); this.scene.add(rim);
 
     const capsule = new THREE.CapsuleGeometry(initial.radius, CONFIG.soldier.height - initial.radius * 2, 2, 6);
@@ -157,19 +157,27 @@ export class BattleRenderer {
   private adaptationTotal = 0;
   private beamDirection = new THREE.Vector3();
   private beamAxis = new THREE.Vector3(0, 0, 1);
+  private hemi!: THREE.HemisphereLight;
+  private sun!: THREE.DirectionalLight;
   private buildWorld() {
     addTerrainWorld(this.world, this.terrain ?? Terrain.flat(this.worldHalfWidth, this.worldHalfDepth));
+    // Each map carries its own sky, fog and light colours.
+    const palette = paletteOf(this.terrain), relief = Math.max(0, this.terrain?.maxHeight ?? 0);
+    (this.scene.background as THREE.Color).set(palette.sky); this.webgl.setClearColor(palette.sky);
+    const fog = this.scene.fog as THREE.Fog; fog.color.set(palette.sky); fog.near = 110 + relief * 3; fog.far = 220 + relief * 5;
+    this.hemi.color.set(palette.hemiSky); this.hemi.groundColor.set(palette.hemiGround);
+    this.sun.color.set(palette.sun); this.sun.intensity = palette.sunIntensity;
   }
 
   private framingDistance(aspect: number) {
-    const halfHeight = Math.max(this.worldHalfDepth * 0.86, this.worldHalfWidth * 0.77 / aspect) + Math.max(0, this.terrain?.maxHeight ?? 0);
+    const halfHeight = Math.max(this.worldHalfDepth * 0.92, this.worldHalfWidth * 0.82 / aspect) + Math.max(0, this.terrain?.maxHeight ?? 0) * 1.1;
     return halfHeight / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
   }
   resetCamera() {
     // Flush orbit/pan inertia before restoring the initial perspective view.
     const damping = this.controls.enableDamping; this.controls.enableDamping = false; this.controls.update();
     this.controls.target.set(0, (this.terrain?.maxHeight ?? 0) * 0.3, 0);
-    this.camera.position.set(13, 47, 43).setLength(this.framingDistance(this.camera.aspect)); this.camera.zoom = 1;
+    this.camera.position.set(11, 58, 40).setLength(this.framingDistance(this.camera.aspect)); this.camera.zoom = 1;
     this.camera.lookAt(0, 0, 0); this.camera.updateProjectionMatrix(); this.controls.update(); this.controls.enableDamping = damping;
   }
   zoom(factor: number) {
@@ -182,12 +190,12 @@ export class BattleRenderer {
     const rect = this.webgl.domElement.getBoundingClientRect();
     this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, 1 - (clientY - rect.top) / rect.height * 2);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const ray = this.raycaster.ray, top = Math.max(0, sim.terrain.maxHeight);
+    const ray = this.raycaster.ray, top = Math.max(0, sim.terrain.maxHeight), bottom = Math.min(0, sim.terrain.minHeight);
     if (ray.direction.y >= -1e-6) return null;
-    // March from the terrain's highest level down to y = 0, then bisect the first surface crossing.
-    let near = Math.max(0, (top - ray.origin.y) / ray.direction.y), far = Math.max(near, -ray.origin.y / ray.direction.y);
+    // March from the terrain's highest level down to its lowest, then bisect the first surface crossing.
+    let near = Math.max(0, (top - ray.origin.y) / ray.direction.y), far = Math.max(near, (bottom - ray.origin.y) / ray.direction.y);
     const above = (t: number) => { ray.at(t, this.groundPoint); return this.groundPoint.y > sim.terrain.heightAt(this.groundPoint.x, this.groundPoint.z); };
-    if (top > 0) {
+    if (top > bottom) {
       const samples = 96, span = far - near;
       for (let n = 1; n <= samples; n++) { const t = near + span * n / samples; if (!above(t)) { far = t; near = t - span / samples; break; } }
       for (let n = 0; n < 24; n++) { const mid = (near + far) / 2; if (above(mid)) near = mid; else far = mid; }

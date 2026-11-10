@@ -47,7 +47,7 @@ try {
   const afterOrbit = await page.evaluate(() => { const c = window.__battle.renderer.controls; return { azimuth: c.getAzimuthalAngle(), polar: c.getPolarAngle(), target: c.target.toArray(), distance: c.getDistance() }; });
   assert.ok(Math.abs(afterOrbit.azimuth - beforeOrbit.azimuth) > 0.1);
   assert.ok(Math.abs(afterOrbit.polar - beforeOrbit.polar) > 0.1);
-  assert.deepEqual(afterOrbit.target, beforeOrbit.target); assert.ok(Math.abs(afterOrbit.distance - beforeOrbit.distance) < 0.001);
+  afterOrbit.target.forEach((v, k) => assert.ok(Math.abs(v - beforeOrbit.target[k]) < 1e-9, 'orbit moved the target')); assert.ok(Math.abs(afterOrbit.distance - beforeOrbit.distance) < 0.001);
   await page.screenshot({ path: 'artifacts/orbit-desktop.png' });
   await page.click('#center'); await page.waitForTimeout(180);
   const resetOrbit = await page.evaluate(() => { const c = window.__battle.renderer.controls; return { azimuth: c.getAzimuthalAngle(), polar: c.getPolarAngle() }; });
@@ -70,6 +70,14 @@ try {
   await page.screenshot({ path: 'artifacts/outcome-desktop.png' });
   await page.click('#close-diagnostics'); await page.click('#play-again');
   assert.equal(await page.locator('#outcome').isVisible(), false);
+  // Restart replays the same map; New map always changes the landscape type and the header follows.
+  const map = () => page.evaluate(() => ({ seed: window.__battle.terrainSeed, ...window.__battle.map, label: document.querySelector('#map-name').textContent }));
+  const first = await map(); await page.click('#restart'); const replayed = await map();
+  assert.equal(replayed.seed, first.seed); assert.equal(replayed.archetype, first.archetype);
+  await page.click('#new-map'); const rerolled = await map();
+  assert.notEqual(rerolled.archetype, first.archetype); assert.equal(rerolled.label, rerolled.name.toUpperCase());
+  await page.evaluate(() => document.activeElement?.blur()); await page.keyboard.press('KeyN'); assert.notEqual((await map()).archetype, rerolled.archetype);
+  reports.maps = [first, rerolled];
   for (let n = 0; n < 6; n++) await page.click('#restart');
   const afterResources = await page.evaluate(() => ({ geometries: window.__battle.renderer.webgl.info.memory.geometries, textures: window.__battle.renderer.webgl.info.memory.textures }));
   assert.deepEqual(afterResources, resources);
@@ -78,9 +86,10 @@ try {
   const flashResult = await page.evaluate(async () => {
     const g = window.__battle, r = g.renderer;
     const slot = 0; const sim = g.sim;
-    r.camera.position.set(sim.x[slot], 12, sim.z[slot] + 12); r.controls.target.set(sim.x[slot], 0, sim.z[slot]); r.camera.zoom = 3;
+    const ground = sim.y[slot]; // terrain height under the soldier
+    r.camera.position.set(sim.x[slot], ground + 12, sim.z[slot] + 12); r.controls.target.set(sim.x[slot], ground, sim.z[slot]); r.camera.zoom = 3;
     r.camera.lookAt(r.controls.target); r.camera.updateProjectionMatrix(); r.controls.update();
-    const p = r.project(sim.x[slot], 0.55, sim.z[slot]);
+    const p = r.project(sim.x[slot], ground + 0.55, sim.z[slot]);
     const gl = r.webgl.getContext(), width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
     const px = Math.round((p.x + 1) * 0.5 * width), py = Math.round((p.y + 1) * 0.5 * height);
     function brightness() { const pixels = new Uint8Array(5 * 5 * 4); gl.readPixels(px - 2, py - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, pixels); let sum = 0; for (let i = 0; i < pixels.length; i += 4) sum += pixels[i] + pixels[i + 1] + pixels[i + 2]; return sum / 75; }

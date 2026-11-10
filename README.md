@@ -35,10 +35,11 @@ The browser smoke test uses Playwright Chromium. Set `BATTLE_CHROMIUM` to a brow
 
 ## Play
 
-The battle starts automatically on newly generated terrain. Soldiers navigate around solid boulders and steep faces, cross ridge passes, and walk up accessible rock shoulders. They approach a visible enemy in 3D weapon range and reposition when terrain hides a target. Ground, rocks, and the first enemy capsule intercept lasers; shots from both teams resolve before damage is committed. Living soldiers block movement, while teammates allow friendly shots through.
+The battle starts automatically on a newly generated map. Every map is one of eleven landscape types (canyon, terraces, craters, massif, valley, mesas, blades, ice, badlands, fortress, escarpment), each with its own palette and real cliffs, plateaus and gorges; some are mirrored and fair, others give one army the high ground. The header names the map, its region and, on asymmetric maps, which army holds the heights. Soldiers navigate around solid boulders and steep faces, cross ridge passes, and walk up accessible rock shoulders. They approach a visible enemy in 3D weapon range and reposition when terrain hides a target. Ground, rocks, and the first enemy capsule intercept lasers; shots from both teams resolve before damage is committed. Living soldiers block movement, while teammates allow friendly shots through.
 
 - **Pause / Space:** pause or resume.
-- **Restart / R:** generate a new landscape using a fresh terrain seed. Deployment/combat keep their separate tuning seed.
+- **Restart / R:** replay the battle on the same map.
+- **New map / N / Play again:** a new battle on a fresh map, always of a different landscape type than the current one.
 - **Left-drag / one-finger drag:** pan. **Hold right-click and drag:** orbit the perspective camera.
 - **Wheel / pinch / + / −:** zoom toward or away from the battlefield.
 - **Center view / C:** reset the camera.
@@ -75,8 +76,9 @@ Explosions use the full 3D distance from their center to each soldier capsule's 
 
 ## Architecture
 
-- `src/terrain.ts`: seeded basins, hills, climbable mesas, field-spanning ridges with passes, and convex small boulders. Shared triangle heights/slopes, support checks, swept traversal, spatially indexed cover rays, protected formations, and bounded repairs.
-- `src/navigation.ts`: infantry clearance graph, connected regions, two shared multi-source flow fields rebuilt under a 1,024-node-per-tick budget, and bounded diagnostic A*. Soldiers use local steering and swept collision for crowd separation.
+- `src/terrain-archetypes.ts`, `src/terrain-shapes.ts`: the landscape types (layout plans of heights, spawn-pad levels, designed ramps, rock style and palette) and the noise, ridge and grading primitives they are built from.
+- `src/terrain.ts`: seeded generation from an archetype plan (mirrored for symmetric maps), spawn pads, graded ramps and convex boulders. Shared triangle heights/slopes, support checks, swept traversal, spatially indexed cover rays, protected formations, and bounded repairs.
+- `src/navigation.ts`: infantry clearance graph, connected regions, connectivity repair, two shared multi-source flow fields (narrow ground costs up to 5× so whole armies prefer wide approaches) rebuilt under a 1,024-node-per-tick budget, and bounded diagnostic A*. Soldiers use local steering and swept collision for crowd separation.
 - `src/simulation.ts`: renderer-independent 60 Hz simulation; compact unit arrays including elevation, stable IDs, dynamic spatial grid, staggered target/visibility refreshes, 3D capsule/terrain hitscan, and simultaneous damage. Actual shots always check cover; repeated enemy tests within a shot are deduplicated.
 - `src/renderer.ts`, `src/terrain-renderer.ts`: instanced capsules, guns, visors, sloped contact shadows and bounded effects; terrain meshes built from gameplay geometry, vertical gun/beam aiming, terrain-aware camera clearance, adaptive render scale, and GPU disposal on resets.
 - `src/config.ts`: battlefield, unit and feedback constants, weapon definitions and pool budgets.
@@ -87,7 +89,7 @@ Explosions use the full 3D distance from their center to each soldier capsule's 
 - `src/audio.ts`: five original synthesized Web Audio effects, reusable PCM buffers, independent persisted mixer channels, stereo spread and compressed output. Combat notifications are bounded, rate-limited and capped at 24 simultaneous voices; pause, hidden tabs and restarts clear active sounds. Cosmetic event limits never affect combat damage.
 - `src/main.ts`: responsive HUD, camera and battle controls, bounded fixed-step scheduling, visibility pausing, performance sampling and developer API.
 
-Climbable rocks use a single support surface with natural sloped approaches. Vertical faces block movement. Terrain has no tunnels or overhangs. Maps protect both deployment envelopes and validate access between armies and mesa tops. If a rare map cannot be repaired within five slope reductions, a gentle obstacle-free fallback keeps deployment playable and is exposed as six repairs in diagnostics.
+Climbable rocks use a single support surface with natural sloped approaches. Vertical faces block movement. Terrain has no tunnels or overhangs. Maps protect both deployment envelopes and validate access between the armies and every climbable top. Where something is cut off, the generator carves a graded ramp (at most 0.5 rise per unit) along the cheapest route; it then checks that the armies are linked by ground at least 1.25 units from any cliff, and widens the route with a broader ramp if not. If a map still cannot be connected, its layout is re-rolled up to three times with the same seed and type. Only after that does a gentle obstacle-free fallback keep deployment playable, shown as 99 repairs in diagnostics; the terrain corpus tests forbid it.
 
 `window.__battle` is a developer API. Commands apply on the next simulation boundary:
 
@@ -97,13 +99,16 @@ battle.sim.queue({ type: 'spawn', team: 0, x: 18, z: 20 });
 battle.sim.queue({ type: 'equip', ids: [battle.sim.id[0]], weapon: 1 });
 battle.replay(); // same terrain seed, deployment seed, and current tuning
 battle.restart(500, 74319, 189423); // explicit count, battle seed, terrain seed
+battle.restartMap(); // new battle on the current map
+battle.newMap(); // new battle on a fresh map of a different type
+battle.map; // { archetype, name, region, defender }
 battle.startBenchmark(); // physical-device 5-minute warmup + 10-minute capture
 battle.sim.queue({ type: 'explode', x: 0, y: 0, z: 0, radius: 4, damage: 35, impulse: 10 });
 // Use the current test-explosion tuning:
 battle.explode({ x: 0, y: 0, z: 0 });
 ```
 
-Spawns reject occupied, out-of-bounds, steep, or rock-blocked positions and full capacity. Existing IDs never identify replacements after a slot is reused. Weapon changes preserve cooldowns. Add `?terrain=189423` to reproduce initial terrain; each ordinary restart still randomizes. `?flat=1` selects an explicit flat QA fixture. It is used by the old isolated browser assertions, not normal gameplay.
+Spawns reject occupied, out-of-bounds, steep, or rock-blocked positions and full capacity. Existing IDs never identify replacements after a slot is reused. Weapon changes preserve cooldowns. Add `?terrain=189423` to reproduce the initial map and `?map=<type>` (for example `?map=canyon`) to pin every battle to one landscape type. `?flat=1` selects an explicit flat QA fixture. It is used by the old isolated browser assertions, not normal gameplay.
 
 `battle.sim.inventory[slot]` contains weapon ownership bits and `battle.sim.weapon[slot]` is the active weapon (`255` means unarmed). The existing `equip` command replaces that soldier's loadout with the requested weapon, preserving its cooldown. Explicit API spawns receive their requested weapon (laser rifle by default); percentage allocation applies to army deployment. `battle.equipment` returns a copy of pending percentages, and `battle.setEquipment([{ rifle: 100, sniper: 10, shotgun: 25 }, { rifle: 100, sniper: 0, shotgun: 50 }])` stages a validated loadout for the next restart.
 
