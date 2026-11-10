@@ -20,7 +20,7 @@ export interface TuningDefinition {
 
 export const TUNING: readonly TuningDefinition[] = [
   { key: 'count', label: 'Soldiers per army', group: 'Deployment', min: 1, max: 500, step: 1, unit: '', restart: true, help: 'Changes both armies. Allow enough columns and field depth for the deployment.' },
-  { key: 'seed', label: 'Battle seed', group: 'Deployment', min: 0, max: 4294967295, step: 1, unit: '', restart: true, help: 'Same seed and settings reproduce the same battle.' },
+  { key: 'seed', label: 'Battle seed', group: 'Deployment', min: 0, max: 4294967295, step: 1, unit: '', restart: true, help: 'Controls deployment and combat randomness. Terrain seed appears in diagnostics; explicit replay preserves both seeds.' },
   { key: 'halfWidth', label: 'Battlefield half-width', group: 'Deployment', min: 6, max: 50, step: 0.5, unit: 'u', restart: true, help: 'Room on each side of the center line. Full width is twice this.' },
   { key: 'halfDepth', label: 'Battlefield half-depth', group: 'Deployment', min: 8, max: 65, step: 0.5, unit: 'u', restart: true, help: 'Room in each direction of advance. Full depth is twice this.' },
   { key: 'health', label: 'Soldier health', group: 'Soldiers & weapons', min: 10, max: 1000, step: 1, unit: 'HP', restart: false, help: 'Rescales surviving soldiers proportionally. Dead soldiers stay dead.' },

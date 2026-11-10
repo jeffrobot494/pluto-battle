@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CONFIG, TEAM_COLORS } from './config.ts';
-import { BattleSimulation, random } from './simulation.ts';
+import { BattleSimulation } from './simulation.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
+import { Terrain } from './terrain.ts';
+import { addTerrainWorld } from './terrain-renderer.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
 const bodyColors = [new THREE.Color('#20242b'), new THREE.Color('#925b3b')];
@@ -57,7 +59,7 @@ export class BattleRenderer {
     const sun = new THREE.DirectionalLight('#ffd8b9', 3.0); sun.position.set(-25, 50, 10); this.scene.add(sun);
     const rim = new THREE.DirectionalLight('#b7a0ff', 1.9); rim.position.set(25, 20, -35); this.scene.add(rim);
 
-    const capsule = new THREE.CapsuleGeometry(initial.radius, CONFIG.soldier.height - initial.radius * 2, 3, 7);
+    const capsule = new THREE.CapsuleGeometry(initial.radius, CONFIG.soldier.height - initial.radius * 2, 2, 6);
     this.hitAttribute = new THREE.InstancedBufferAttribute(new Float32Array(CONFIG.capacity), 1);
     this.hitAttribute.setUsage(THREE.DynamicDrawUsage); capsule.setAttribute('aHitAt', this.hitAttribute);
     const skin = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0.18 });
@@ -122,74 +124,24 @@ export class BattleRenderer {
     }
   }
 
+  private terrain: Terrain | null = null;
+  private renderScale = 1;
+  private adaptationFrames = 0;
+  private adaptationTotal = 0;
+  private beamDirection = new THREE.Vector3();
+  private beamAxis = new THREE.Vector3(0, 0, 1);
   private buildWorld() {
-    const rng = random(189423);
-    const ground = new THREE.PlaneGeometry(220, 220, 65, 65); ground.rotateX(-Math.PI / 2);
-    const positions = ground.getAttribute('position');
-    for (let i = 0; i < positions.count; i++) {
-      const x = positions.getX(i), z = positions.getZ(i), edge = Math.max(0, Math.abs(x) - this.worldHalfWidth, Math.abs(z) - this.worldHalfDepth) / 20;
-      positions.setY(i, -0.08 + (rng() - 0.5) * (0.06 + Math.min(2.5, edge)));
-    }
-    ground.computeVertexNormals();
-    const faceted = ground.toNonIndexed(); ground.dispose();
-    const colors = new Float32Array(faceted.getAttribute('position').count * 3), color = new THREE.Color();
-    for (let i = 0; i < colors.length; i += 9) {
-      const tone = rng(); color.setHSL(0.99 + tone * 0.025, 0.39 + rng() * 0.14, 0.18 + rng() * 0.065);
-      for (let n = 0; n < 3; n++) color.toArray(colors, i + n * 3);
-    }
-    faceted.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    this.world.add(new THREE.Mesh(faceted, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true })));
-
-    const rockGeometry = new THREE.DodecahedronGeometry(1, 0);
-    const rocks = new THREE.InstancedMesh(rockGeometry, new THREE.MeshStandardMaterial({ roughness: 0.99, flatShading: true }), 240);
-    const palette = ['#51415f', '#624963', '#765166', '#46384f', '#8a5562'];
-    for (let i = 0; i < 240; i++) {
-      const side = i % 2 ? 1 : -1;
-      const size = 1.5 + rng() * 5;
-      // Keep the whole rotated rock outside the playable rectangle, not just its center.
-      const x = i < 190 ? side * (this.worldHalfWidth + 1 + size * 1.9 + rng() * 34) : (rng() - 0.5) * (this.worldHalfWidth * 2 + 14);
-      const z = i < 190 ? (rng() - 0.5) * (this.worldHalfDepth * 2 + 112) : side * (this.worldHalfDepth + 1 + size * 1.9 + rng() * 25);
-      this.dummy.position.set(x, size * 0.36 - 0.25, z);
-      this.dummy.rotation.set(rng() * 0.6, rng() * 7, rng() * 0.5);
-      this.dummy.scale.set(size * (0.75 + rng()), size * (0.5 + rng() * 1.3), size * (0.8 + rng())); this.dummy.updateMatrix();
-      rocks.setMatrixAt(i, this.dummy.matrix); rocks.setColorAt(i, color.set(palette[i % palette.length]));
-    }
-    rocks.computeBoundingSphere(); this.world.add(rocks);
-
-    // Small stones are surface detail, below the capsule's feet, rather than hidden obstacles.
-    const gravel = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), new THREE.MeshStandardMaterial({ color: '#65424d', roughness: 1, flatShading: true }), 500);
-    for (let i = 0; i < 500; i++) {
-      this.dummy.position.set((rng() - 0.5) * 140, -0.045, (rng() - 0.5) * 160);
-      this.dummy.rotation.set(0, rng() * 7, 0); const size = 0.07 + rng() * 0.22;
-      this.dummy.scale.set(size * 1.8, 0.055, size); this.dummy.updateMatrix(); gravel.setMatrixAt(i, this.dummy.matrix);
-    }
-    gravel.computeBoundingSphere(); this.world.add(gravel);
-
-    // Subtle survey marks, outside the deployment, make the field readable without a game grid.
-    const marks: number[] = [];
-    for (const x of [-this.worldHalfWidth + 1, this.worldHalfWidth - 1]) for (let z = -this.worldHalfDepth + 4; z <= this.worldHalfDepth - 4; z += 5) marks.push(x - 0.35, 0.015, z, x + 0.35, 0.015, z);
-    for (const z of [-this.worldHalfDepth + 2, this.worldHalfDepth - 2]) for (let x = -this.worldHalfWidth + 3; x <= this.worldHalfWidth - 3; x += 5) marks.push(x, 0.015, z - 0.35, x, 0.015, z + 0.35);
-    const markGeometry = new THREE.BufferGeometry(); markGeometry.setAttribute('position', new THREE.Float32BufferAttribute(marks, 3));
-    this.world.add(new THREE.LineSegments(markGeometry, new THREE.LineBasicMaterial({ color: '#e4abb0', transparent: true, opacity: 0.3 })));
-
-    // A few distant violet crystal clusters are part of the boundary scenery.
-    const crystals = new THREE.InstancedMesh(new THREE.ConeGeometry(0.48, 3, 5), new THREE.MeshStandardMaterial({ color: '#9d6dc3', emissive: '#43224e', emissiveIntensity: 0.3, roughness: 0.55, flatShading: true }), 34);
-    for (let i = 0; i < 34; i++) {
-      this.dummy.position.set((i % 2 ? 1 : -1) * (this.worldHalfWidth + 3 + rng() * 12), 0.65, (rng() - 0.5) * (this.worldHalfDepth * 2 + 32));
-      this.dummy.rotation.set((rng() - 0.5) * 0.6, rng() * 6, (rng() - 0.5) * 0.6); const s = 0.6 + rng() * 0.7;
-      this.dummy.scale.set(s, s, s); this.dummy.updateMatrix(); crystals.setMatrixAt(i, this.dummy.matrix);
-    }
-    crystals.computeBoundingSphere(); this.world.add(crystals);
+    addTerrainWorld(this.world, this.terrain ?? Terrain.flat(this.worldHalfWidth, this.worldHalfDepth));
   }
 
   private framingDistance(aspect: number) {
-    const halfHeight = Math.max(aspect < 0.8 ? 30 : 29, 16 / aspect);
+    const halfHeight = Math.max(this.worldHalfDepth * 0.86, this.worldHalfWidth * 0.77 / aspect) + Math.max(0, this.terrain?.maxHeight ?? 0);
     return halfHeight / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
   }
   resetCamera() {
     // Flush orbit/pan inertia before restoring the initial perspective view.
     const damping = this.controls.enableDamping; this.controls.enableDamping = false; this.controls.update();
-    this.controls.target.set(0, 0, 0);
+    this.controls.target.set(0, (this.terrain?.maxHeight ?? 0) * 0.3, 0);
     this.camera.position.set(13, 47, 43).setLength(this.framingDistance(this.camera.aspect)); this.camera.zoom = 1;
     this.camera.lookAt(0, 0, 0); this.camera.updateProjectionMatrix(); this.controls.update(); this.controls.enableDamping = damping;
   }
@@ -211,19 +163,29 @@ export class BattleRenderer {
     }
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
-    this.webgl.setPixelRatio(Math.min(devicePixelRatio, this.quality === 'low' ? 1 : 1.5));
+    this.webgl.setPixelRatio(Math.min(devicePixelRatio, this.quality === 'low' ? 1 : 1.5) * this.renderScale);
     this.webgl.setSize(this.width, this.height);
   }
-  setQuality(quality: 'balanced' | 'low') { this.quality = quality; this.resize(); }
+  setQuality(quality: 'balanced' | 'low') { this.quality = quality; this.renderScale = 1; this.resize(); }
+  adapt(elapsedMs: number) {
+    if (elapsedMs > 100) return;
+    this.adaptationTotal += elapsedMs; this.adaptationFrames++;
+    if (this.adaptationFrames < 120) return;
+    const mean = this.adaptationTotal / this.adaptationFrames;
+    const next = mean > 18.5 ? Math.max(0.65, this.renderScale - 0.1) : mean < 16.8 ? Math.min(1, this.renderScale + 0.05) : this.renderScale;
+    this.adaptationTotal = this.adaptationFrames = 0;
+    if (Math.abs(next - this.renderScale) > 0.001) { this.renderScale = next; this.resize(); }
+  }
+  get resolutionScale() { return this.renderScale; }
 
   update(sim: BattleSimulation, alpha: number, visualTime: number) {
-    if (this.worldHalfWidth !== sim.grid.halfWidth || this.worldHalfDepth !== sim.grid.halfDepth) {
+    if (this.terrain !== sim.terrain) {
       this.world.traverse(object => { const mesh = object as THREE.InstancedMesh; if (mesh.isInstancedMesh) mesh.dispose(); mesh.geometry?.dispose(); if (mesh.material) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) m.dispose(); });
-      this.world.clear(); this.worldHalfWidth = sim.grid.halfWidth; this.worldHalfDepth = sim.grid.halfDepth; this.buildWorld();
+      this.world.clear(); this.worldHalfWidth = sim.grid.halfWidth; this.worldHalfDepth = sim.grid.halfDepth; this.terrain = sim.terrain; this.buildWorld(); this.resetCamera();
     }
     if (this.bodyRadius !== sim.tuning.radius) {
       this.bodies.geometry.dispose(); this.bodyRadius = sim.tuning.radius;
-      this.bodies.geometry = new THREE.CapsuleGeometry(this.bodyRadius, CONFIG.soldier.height - this.bodyRadius * 2, 3, 7);
+      this.bodies.geometry = new THREE.CapsuleGeometry(this.bodyRadius, CONFIG.soldier.height - this.bodyRadius * 2, 2, 6);
       this.bodies.geometry.setAttribute('aHitAt', this.hitAttribute);
     }
     this.uniforms.time.value = visualTime;
@@ -233,21 +195,26 @@ export class BattleRenderer {
       const dead = sim.hp[i] <= 0, age = dead ? visualTime - sim.diedAt[i] : 0;
       if (dead && age >= CONFIG.corpseLifetime) continue;
       const x = THREE.MathUtils.lerp(sim.previousX[i], sim.x[i], alpha), z = THREE.MathUtils.lerp(sim.previousZ[i], sim.z[i], alpha);
+      const groundY = sim.hp[i] > 0 ? sim.terrain.heightAt(x, z) : sim.y[i];
       const yaw = sim.facing[i], fall = dead ? Math.min(1, age / 0.32) : 0;
       const fade = dead ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
       const bob = !dead && sim.moving[i] ? Math.sin(sim.time * 17 + i * 3.7) * 0.025 : 0;
-      this.dummy.position.set(x, CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
+      this.dummy.position.set(x, groundY + CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
       this.dummy.rotation.set(fall * Math.PI / 2, yaw, 0, 'YXZ'); this.dummy.scale.setScalar(fade);
       this.dummy.updateMatrix(); this.bodies.setMatrixAt(count, this.dummy.matrix); this.bodies.setColorAt(count, bodyColors[sim.team[i]]);
       this.hitAttribute.setX(count, Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000);
 
       this.baseRotation.setFromEuler(this.dummy.rotation);
       const size = sim.radius[i] / CONFIG.soldier.radius;
-      this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
-      this.dummy.quaternion.copy(this.baseRotation); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
-      this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
+      this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, groundY + 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
+      this.dummy.rotation.set(-sim.aimPitch[i], yaw, fall * Math.PI / 2, 'YXZ'); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
+      this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], groundY + 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
+      this.dummy.quaternion.copy(this.baseRotation);
       this.dummy.updateMatrix(); this.visors.setMatrixAt(count, this.dummy.matrix); this.visors.setColorAt(count, teamColors[sim.team[i]]);
-      this.dummy.position.set(x + 0.11, 0.012, z + 0.08); this.dummy.rotation.set(-Math.PI / 2, 0, 0); this.dummy.scale.setScalar(fade * size);
+      this.dummy.position.set(x, groundY + 0.025, z);
+      const gx = (sim.terrain.heightAt(x + 0.12, z) - sim.terrain.heightAt(x - 0.12, z)) / 0.24;
+      const gz = (sim.terrain.heightAt(x, z + 0.12) - sim.terrain.heightAt(x, z - 0.12)) / 0.24;
+      this.dummy.rotation.set(-Math.PI / 2 + Math.atan(gz), -Math.atan(gx), 0); this.dummy.scale.setScalar(fade * size);
       this.dummy.updateMatrix(); this.shadows.setMatrixAt(count, this.dummy.matrix);
       count++;
     }
@@ -260,21 +227,21 @@ export class BattleRenderer {
     const events = sim.shots;
     for (let i = 0; i < events.capacity; i++) {
       const age = visualTime - events.at[i]; if (age < 0 || age > 0.24) continue;
-      const dx = events.endX[i] - events.x[i], dz = events.endZ[i] - events.z[i], length = Math.hypot(dx, dz);
+      const dx = events.endX[i] - events.x[i], dz = events.endZ[i] - events.z[i], dy = events.endY[i] - events.y[i], length = Math.hypot(dx, dy, dz);
       const color = teamColors[events.team[i]];
       if (age < 0.075) {
-        this.dummy.position.set((events.x[i] + events.endX[i]) / 2, 0.7, (events.z[i] + events.endZ[i]) / 2);
-        this.dummy.rotation.set(0, Math.atan2(dx, dz), 0); this.dummy.scale.set(0.055, 0.055, length); this.dummy.updateMatrix();
+        this.dummy.position.set((events.x[i] + events.endX[i]) / 2, (events.y[i] + events.endY[i]) / 2, (events.z[i] + events.endZ[i]) / 2);
+        this.beamDirection.set(dx, dy, dz).normalize(); this.dummy.quaternion.setFromUnitVectors(this.beamAxis, this.beamDirection); this.dummy.scale.set(0.055, 0.055, length); this.dummy.updateMatrix();
         this.beams.setMatrixAt(beams, this.dummy.matrix); this.beams.setColorAt(beams, this.fxColor.copy(color));
         this.dummy.scale.set(0.17, 0.17, length); this.dummy.updateMatrix(); this.beamGlows.setMatrixAt(beams, this.dummy.matrix); this.beamGlows.setColorAt(beams, color); beams++;
       }
       if (age < 0.07) {
-        this.dummy.position.set(events.x[i], 0.71, events.z[i]); this.dummy.rotation.set(0, age * 30 + i, Math.PI / 4);
+        this.dummy.position.set(events.x[i], events.y[i], events.z[i]); this.dummy.rotation.set(0, age * 30 + i, Math.PI / 4);
         this.dummy.scale.setScalar(0.13 * (1 - age / 0.07)); this.dummy.updateMatrix(); this.flashes.setMatrixAt(flashes, this.dummy.matrix); this.flashes.setColorAt(flashes++, color);
       }
-      if (this.quality !== 'low') for (let p = 0; p < 3; p++) {
+      if (this.quality !== 'low' && i % 3 === 0) for (let p = 0; p < 2; p++) {
         const angle = i * 2.399 + p * 2.094, speed = 1.8 + (i % 3) * 0.6;
-        this.dummy.position.set(events.endX[i] + Math.cos(angle) * age * speed, 0.7 + age * 2 - age * age * 10, events.endZ[i] + Math.sin(angle) * age * speed);
+        this.dummy.position.set(events.endX[i] + Math.cos(angle) * age * speed, events.endY[i] + age * 2 - age * age * 10, events.endZ[i] + Math.sin(angle) * age * speed);
         this.dummy.rotation.set(angle, angle, 0); this.dummy.scale.setScalar(0.045 * (1 - age / 0.24)); this.dummy.updateMatrix();
         this.sparks.setMatrixAt(sparks, this.dummy.matrix); this.sparks.setColorAt(sparks++, color);
       }
@@ -282,7 +249,12 @@ export class BattleRenderer {
     this.beams.count = this.beamGlows.count = beams; this.sparks.count = sparks; this.flashes.count = flashes;
     for (const mesh of [this.beams, this.beamGlows, this.sparks, this.flashes]) if (mesh.count > 0) this.upload(mesh);
     this.activeEffects = beams + sparks + flashes;
-    this.controls.update(); this.webgl.render(this.scene, this.camera);
+    this.controls.update();
+    if (this.terrain && Math.abs(this.camera.position.x) <= this.worldHalfWidth && Math.abs(this.camera.position.z) <= this.worldHalfDepth) {
+      const minimum = this.terrain.heightAt(this.camera.position.x, this.camera.position.z) + 1.25;
+      if (this.camera.position.y < minimum) { this.camera.position.y = minimum; this.camera.lookAt(this.controls.target); }
+    }
+    this.webgl.render(this.scene, this.camera);
   }
 
   dispose() {

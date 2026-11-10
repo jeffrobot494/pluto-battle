@@ -6,7 +6,7 @@ Give every new battle a visibly different, playable alien landscape: depressions
 
 Maintain 60 FPS with up to **500 soldiers per side / 1,000 living soldiers total**, including sustained movement, congestion, targeting, and firing on the generated terrain. This replaces the earlier 200-unit performance target; 500-versus-500 is a required workload.
 
-This is an implementation plan. No terrain implementation or worktree creation is part of this planning change.
+Implementation is in the sibling `pluto-battle-terrain` worktree on `terrain/randomized-battlefield`. See `terrain-validation.md` for the verification record and remaining physical Pixel 10 performance acceptance. The sections below retain the design and acceptance plan.
 
 ## Performance contract
 

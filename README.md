@@ -11,7 +11,7 @@ npm ci
 npm run dev
 ```
 
-Open **http://localhost:5180/**. For a phone on the same Wi-Fi, use the network address printed by Vite. The current workspace has a local copy of the matching `pluto-mobile` dependencies, so you can run `npm run dev` immediately. The lockfile supports an independent clean install.
+Open **http://localhost:5181/**. For a phone on the same Wi-Fi, use the network address printed by Vite and port 5181. This terrain worktree is on branch `terrain/randomized-battlefield`; the original game remains separate. The lockfile supports an independent clean install.
 
 ```sh
 npm test          # deterministic simulation and collision checks
@@ -22,20 +22,23 @@ npm run test:tuning # all 25 controls, persistence, validation and responsive la
 npm run test:balance # 100 deterministic seeds; report under artifacts/
 npm run test:audio:browser # sound output, mixer persistence and desktop/touch controls
 npm run benchmark # sustained desktop combat with all 200 kept alive
+npm run test:terrain:browser # seeded terrain, 20 resets, 1,000 units, touch, capture controls
+npm run test:browser:all     # isolated flat-scene combat/camera/audio/tuning regressions
+npm run benchmark:terrain   # sustained 500 vs 500 (server on 5181)
 ```
 
 The browser smoke test uses Playwright Chromium. Set `BATTLE_CHROMIUM` to a browser executable if needed, `BATTLE_URL` to another local server URL, or `BATTLE_SOFTWARE=1` to use SwiftShader. It writes screenshots and a JSON report into `artifacts/`. Install Chromium with `npx playwright install chromium` if it is not already available.
 
 ## Play
 
-The battle starts automatically. Soldiers acquire enemies, approach until in laser range, fire, and reacquire targets. Both teams use the same initial stats. Living soldiers block both teams' movement; teammates allow friendly shots through. Lasers hit the first enemy along the beam, and shots from both teams resolve before damage is committed.
+The battle starts automatically on newly generated terrain. Soldiers navigate around solid boulders and steep faces, cross ridge passes, and walk up accessible rock shoulders. They approach a visible enemy in 3D weapon range and reposition when terrain hides a target. Ground, rocks, and the first enemy capsule intercept lasers; shots from both teams resolve before damage is committed. Living soldiers block movement, while teammates allow friendly shots through.
 
 - **Pause / Space:** pause or resume.
-- **Restart / R:** replay the same deployment and seed.
+- **Restart / R:** generate a new landscape using a fresh terrain seed. Deployment/combat keep their separate tuning seed.
 - **Left-drag / one-finger drag:** pan. **Hold right-click and drag:** orbit the perspective camera.
 - **Wheel / pinch / + / −:** zoom toward or away from the battlefield.
 - **Center view / C:** reset the camera.
-- **FPS badge / D:** diagnostics, quality controls and 250-vs-250 / 500-vs-500 stress deployments.
+- **FPS badge / D:** diagnostics, adaptive quality controls, deployment presets through 500 vs 500, and the on-device performance capture.
 - **Tuning / T:** expand or collapse all 25 battle controls. Each group also collapses independently. Live controls affect both armies immediately; controls labeled **NEW BATTLE** take effect when you deploy or restart. Changed values have a green dot, and settings persist in this browser. **Reset defaults** resets the values; **New battle** applies the full configuration. Invalid formations show an explanation and cannot deploy.
 - **Sound effects:** expand the lower-left panel to adjust laser firing, Plutonian hit, Sectoid hit, Plutonian dying and Sectoid dying volumes independently. Each has a preview button; 0% mutes that effect. Levels save in this browser across reloads and restarts. Tap/click or press a key anywhere to enable audio on the first visit.
 
@@ -47,14 +50,16 @@ Crowd steering uses a separate seeded random stream to assign each soldier a sta
 
 ## Architecture
 
-- `src/simulation.ts`: renderer-independent fixed 60 Hz simulation; compact reusable unit arrays, monotonic IDs, intrusive spatial grid, swept-circle movement checks, local steering, staggered targeting, grid-traversed hitscan weapons and simultaneous damage.
-- `src/renderer.ts`: shared instanced capsules, guns, visors and contact shadows; per-instance hit timestamps; pooled laser/muzzle/impact effects; seeded low-poly terrain and boundary rocks. No skeletal animation, dynamic shot lights or per-unit DOM elements.
+- `src/terrain.ts`: seeded basins, hills, climbable mesas, field-spanning ridges with passes, and convex small boulders. Shared triangle heights/slopes, support checks, swept traversal, spatially indexed cover rays, protected formations, and bounded repairs.
+- `src/navigation.ts`: infantry clearance graph, connected regions, two shared multi-source flow fields rebuilt under a 1,024-node-per-tick budget, and bounded diagnostic A*. Soldiers use local steering and swept collision for crowd separation.
+- `src/simulation.ts`: renderer-independent 60 Hz simulation; compact unit arrays including elevation, stable IDs, dynamic spatial grid, staggered target/visibility refreshes, 3D capsule/terrain hitscan, and simultaneous damage. Actual shots always check cover; repeated enemy tests within a shot are deduplicated.
+- `src/renderer.ts`, `src/terrain-renderer.ts`: instanced capsules, guns, visors, sloped contact shadows and bounded effects; terrain meshes built from gameplay geometry, vertical gun/beam aiming, terrain-aware camera clearance, adaptive render scale, and GPU disposal on resets.
 - `src/config.ts`: battlefield, unit and feedback constants, weapon definitions and pool budgets.
 - `src/tuning.ts`, `src/tuning-panel.ts`: the 25-control schema, deployment validation, browser persistence, live/restart behavior and collapsible tuning UI. Each simulation owns its settings and rifle definition, so tuning one simulation does not mutate another.
 - `src/audio.ts`: five original synthesized Web Audio effects, reusable PCM buffers, independent persisted mixer channels, stereo spread and compressed output. Combat notifications are bounded, rate-limited and capped at 24 simultaneous voices; pause, hidden tabs and restarts clear active sounds. Cosmetic event limits never affect combat damage.
 - `src/main.ts`: responsive HUD, camera and battle controls, bounded fixed-step scheduling, visibility pausing, performance sampling and developer API.
 
-Large rocks are scenery outside the walkable battlefield. Small gravel is only a ground detail. Interior blocking terrain and general route finding are deferred.
+Climbable rocks use a single support surface with natural sloped approaches. Vertical faces block movement. Terrain has no tunnels or overhangs. Maps protect both deployment envelopes and validate access between armies and mesa tops. If a rare map cannot be repaired within five slope reductions, a gentle obstacle-free fallback keeps deployment playable and is exposed as six repairs in diagnostics.
 
 `window.__battle` is a developer API. Commands apply on the next simulation boundary:
 
@@ -62,18 +67,21 @@ Large rocks are scenery outside the walkable battlefield. Small gravel is only a
 const battle = window.__battle;
 battle.sim.queue({ type: 'spawn', team: 0, x: 18, z: 20 });
 battle.sim.queue({ type: 'equip', ids: [battle.sim.id[0]], weapon: 1 });
+battle.replay(); // same terrain seed, deployment seed, and current tuning
+battle.restart(500, 74319, 189423); // explicit count, battle seed, terrain seed
+battle.startBenchmark(); // physical-device 5-minute warmup + 10-minute capture
 ```
 
-Spawns reject occupied/out-of-bounds positions and full capacity. Existing IDs never identify replacement units after a slot is reused. Weapon changes preserve cooldowns. The queue owns its ID lists. These APIs prepare for later reinforcements and upgrades; player-facing purchases, jump jets, vehicles, bombs and missiles are deferred.
+Spawns reject occupied, out-of-bounds, steep, or rock-blocked positions and full capacity. Existing IDs never identify replacements after a slot is reused. Weapon changes preserve cooldowns. Add `?terrain=189423` to reproduce initial terrain; each ordinary restart still randomizes. `?flat=1` selects an explicit flat QA fixture. It is used by the old isolated browser assertions, not normal gameplay.
 
 ## Performance scope
 
-The initial requirement is 200 active combatants at 60 FPS. The diagnostics show rolling frame p95/p99, simulation time, render submission time, draw calls, triangles, effects, resource counts and pixel ratio. Render submission measures CPU work, not GPU completion. Balanced quality caps pixel ratio at 1.5; Low caps it at 1. Cosmetic effects use a bounded buffer and never determine whether damage applies.
+The requirement is **60 FPS at up to 500 soldiers per side (1,000 total) on Google Pixel 10**, assuming Chrome. Physical-device acceptance is still pending. Diagnostics expose frame p95/p99, CPU simulation/render submission, navigation work, blocked units, terrain seed/build timing, resource counts, render scale, and dropped simulation time. The fixed simulation remains 60 Hz; lost catch-up time is recorded rather than hidden.
 
-Stress presets are diagnostic tools, not a 60 FPS guarantee at 500 or 1,000 units. Emulated phone viewports check layout and touch controls; they do not benchmark a physical phone. Sustained target-phone testing, including thermal behavior, is still required before accepting mobile performance.
+Adaptive quality caps pixel ratio at 1.5 (Low at 1) and scales it between 65% and 100% based on sustained frame pacing. Reduced capsule tessellation and bounded sparks reduce GPU work without removing soldiers, cover, collision, or damage. Emulated phone viewports validate layout and touch behavior; they do not establish physical-phone performance.
 
-The initial NVIDIA RTX 3050 laptop baseline at 1440×1000, pixel ratio 1, measured approximately 56 FPS in normal headless Chromium with p95 18.5 ms. A subsequent uncapped throughput check with the tuning panel open, all 200 soldiers kept alive, and 480 captured frames measured p95 1.6 ms, with average render submission around 0.49 ms. The uncapped check measures available throughput; it does not establish display pacing or phone performance. Set `BATTLE_UNCAPPED=1` using your shell's syntax for an uncapped benchmark. Reports are written to `artifacts/benchmark*.json`. Browser screenshot/test timings include capture stalls and should not be used as the benchmark.
+For the Pixel 10 test, open the game over Wi-Fi, open diagnostics, and tap **Benchmark 500 vs 500 · 15 min**. Keep the page visible. It retains all 1,000 soldiers, alternates 30-second movement/congestion and combat phases, warms for 5 minutes, and records for 10 minutes. Completion pauses the battle and enables **Save benchmark report**. Pause, hiding the page, or a reset cancels an active capture. Save the JSON and record the device model, browser/OS versions, charging conditions, and orientation. Inspect FPS/p95/p99 together with simulation Hz and dropped simulation seconds. No mobile-performance pass is claimed until the warmed phone result meets the requirement.
 
-Validation includes deterministic simulation/audio/tuning tests, a 100-seed balance sweep and browser passes covering all 25 tuning controls, persistence, invalid deployment rejection, desktop/touch controls, both rendered laser colors, GPU hit-flash brightness/restoration, 1,000-unit stress deployment, battle completion and stable resource counts across restarts and battlefield rebuilds. Set `BATTLE_PANEL=1` when running the benchmark to include the open tuning panel.
+Desktop comparison results and the verification record are in `terrain-validation.md`. Raw reports/screenshots are generated in ignored `artifacts/`. Browser screenshots, explicit simulation stepping, and smoke-test timings include deliberate stalls and are not performance measurements. `BATTLE_SOURCE=.` makes `benchmark:terrain` start an isolated local server; `BATTLE_UNCAPPED=1` measures uncapped desktop throughput. The original `benchmark` command retains its older 200-unit scope.
 
 The existing `../pluto-mobile` game is unchanged. No hosted deployment or backend is needed.
