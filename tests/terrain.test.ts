@@ -4,6 +4,9 @@ import { Terrain, generateTerrain } from '../src/terrain.ts';
 import { Navigation, prepareTerrain } from '../src/navigation.ts';
 import { BattleSimulation, rayCapsule } from '../src/simulation.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
+import * as THREE from 'three';
+import { addTerrainWorld } from '../src/terrain-renderer.ts';
+import { random } from '../src/random.ts';
 
 test('terrain seeds reproduce exact geometry and fresh seeds change the battlefield', () => {
   const a = generateTerrain(DEFAULT_TUNING, 17), b = generateTerrain(DEFAULT_TUNING, 17), c = generateTerrain(DEFAULT_TUNING, 18);
@@ -61,8 +64,75 @@ test('convex rock cover blocks movement and shots while high shots pass over it'
   const sim = new BattleSimulation(0, 1, 2048, undefined, terrain);
   assert.equal(sim.spawn(0, 0, 0), null);
   const a = sim.spawn(0, -3, 0)!, b = sim.spawn(1, 3, 0)!;
-  sim.target[sim.byId.get(a)!] = b; sim.nextSearch.fill(999); sim.nextFire.fill(999); sim.nextFire[sim.byId.get(a)!] = 0;
-  sim.step(); assert.equal(sim.hp[sim.byId.get(b)!], 100); assert.ok(sim.shots.endX[0] < 0);
+  const shooter = sim.byId.get(a)!;
+  sim.target[shooter] = b; sim.visible[shooter] = 1; sim.nextSearch.fill(999); sim.nextFire.fill(999); sim.nextFire[shooter] = 0;
+  sim.step(); assert.equal(sim.hp[sim.byId.get(b)!], 100); assert.equal(sim.shots.cursor, 0);
+  assert.equal(sim.visible[shooter], 0, 'fresh cover check must invalidate stale visibility');
+  assert.equal(sim.lastFire[shooter], -Infinity);
+  assert.ok(sim.nextFire[shooter] > sim.time, 'blocked rifles retain their staggered phase');
+});
+
+test('capsule rays reject enemies behind the muzzle, including behind solid cover', () => {
+  assert.equal(rayCapsule(0, 0.7, 0, 1, 0, 0, -1.2, 0, 0, 0.29), Infinity);
+  assert.equal(rayCapsule(0, 0.7, 0, 1, 0, 0, 0, 0, 0, 0.29), 0);
+  const terrain = Terrain.flat(8, 8);
+  terrain.rocks.push({ x: -0.6, z: 0, radius: 0.12, base: -0.1, height: 2, angle: 0 }); terrain.rebuild();
+  const sim = new BattleSimulation(0, 7, 32, undefined, terrain);
+  const a = sim.spawn(0, 0, 0)!, b = sim.spawn(1, 3, 0)!, rear = sim.spawn(1, -1.2, 0)!;
+  assert.ok(a && b && rear);
+  const shooter = sim.byId.get(a)!, target = sim.byId.get(b)!, behind = sim.byId.get(rear)!;
+  sim.target[shooter] = b; sim.visible[shooter] = 1; sim.nextSearch.fill(999); sim.nextFire.fill(999); sim.nextFire[shooter] = 0;
+  sim.step(); assert.equal(sim.hp[behind], 100); assert.equal(sim.hp[target], 91);
+  assert.ok(sim.shots.endX[0] > 2, 'beam and damage must travel forward to the visible enemy');
+});
+
+test('ridge cover blocks sight and direct fire from both sides even with stale visibility', () => {
+  const terrain = Terrain.flat(8, 8);
+  for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) terrain.heights[r * (terrain.columns + 1) + c] = Math.max(0, 2.5 - Math.abs(-8 + c * terrain.dx) * 0.7);
+  terrain.rebuild();
+  assert.equal(terrain.visible(-5, 0.7, 0, 5, 0.7, 0), false);
+  assert.equal(terrain.visible(5, 0.7, 0, -5, 0.7, 0), false);
+  const sim = new BattleSimulation(0, 7, 32, undefined, terrain);
+  const a = sim.spawn(0, -5, 0)!, b = sim.spawn(1, 5, 0)!; assert.ok(a && b);
+  sim.target[0] = b; sim.target[1] = a; sim.visible.fill(1); sim.nextSearch.fill(999); sim.nextFire.fill(0);
+  sim.step(); assert.equal(sim.totalShots, 0); assert.equal(sim.shots.cursor, 0);
+  assert.equal(sim.events.cursor, 0); assert.deepEqual(Array.from(sim.hp.slice(0, 2)), [100, 100]);
+});
+
+test('cached hidden targets emit no lasers and a clear elevated firing line still deals damage', () => {
+  for (const height of [2.5, 0.2]) {
+    const terrain = Terrain.flat(8, 8);
+    for (let r = 0; r <= terrain.rows; r++) for (let c = 0; c <= terrain.columns; c++) terrain.heights[r * (terrain.columns + 1) + c] = Math.max(0, 1 - Math.abs(-8 + c * terrain.dx) / 3) * height;
+    terrain.rebuild();
+    const sim = new BattleSimulation(0, 7, 32, undefined, terrain);
+    const a = sim.spawn(0, -5, 0)!, b = sim.spawn(1, 5, 0)!;
+    sim.target[0] = b; sim.target[1] = a; sim.visible.fill(+(height < 0.7)); sim.nextSearch.fill(999); sim.nextFire.fill(0);
+    sim.step();
+    const expectedShots = height < 0.7 ? 2 : 0;
+    assert.equal(sim.totalShots, expectedShots); assert.equal(sim.shots.cursor, expectedShots);
+    assert.deepEqual(Array.from(sim.hp.slice(0, 2)), height < 0.7 ? [91, 91] : [100, 100]);
+  }
+});
+
+test('terrain sight rays agree with the independently intersected rendered ground and boulders', () => {
+  const terrain = generateTerrain(DEFAULT_TUNING, 189423), world = new THREE.Group(); addTerrainWorld(world, terrain); world.updateMatrixWorld(true);
+  const solids = world.children.slice(0, 2) as THREE.Mesh[];
+  for (const solid of solids) (solid.material as THREE.Material).side = THREE.DoubleSide;
+  const rng = random(4932), ray = new THREE.Raycaster(), origin = new THREE.Vector3(), direction = new THREE.Vector3();
+  let checked = 0, occluded = 0;
+  for (let attempt = 0; checked < 120 && attempt < 1000; attempt++) {
+    const x = (rng() * 2 - 1) * 25, z = (rng() * 2 - 1) * 31;
+    const angle = rng() * Math.PI * 2, length = 4 + rng() * 9;
+    const tx = Math.max(-27, Math.min(27, x + Math.cos(angle) * length)), tz = Math.max(-33, Math.min(33, z + Math.sin(angle) * length));
+    if (!terrain.canStand(x, z, 0.29) || !terrain.canStand(tx, tz, 0.29)) continue;
+    const y = terrain.heightAt(x, z) + 0.7, ty = terrain.heightAt(tx, tz) + 0.7, distance = Math.hypot(tx - x, ty - y, tz - z);
+    origin.set(x, y, z); direction.set(tx - x, ty - y, tz - z).normalize(); ray.set(origin, direction); ray.far = distance;
+    const hit = ray.intersectObjects(solids, false)[0], actual = terrain.raycast(x, y, z, direction.x, direction.y, direction.z, distance);
+    assert.ok(Math.abs(actual - (hit?.distance ?? distance)) < 2e-4, `ray ${checked}: simulation=${actual}, rendered=${hit?.distance}`);
+    if (hit) occluded++; checked++;
+  }
+  assert.equal(checked, 120); assert.ok(occluded > 10);
+  world.traverse(object => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose(); if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) material.dispose(); });
 });
 
 test('heightfield rays intersect triangle crests from either direction and respect elevation', () => {

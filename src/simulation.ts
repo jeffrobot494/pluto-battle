@@ -14,10 +14,13 @@ export type Command =
 /** First 3D ray/capsule contact. Capsules stand upright on their support surface. */
 export function rayCapsule(x: number, y: number, z: number, dx: number, dy: number, dz: number, cx: number, base: number, cz: number, radius: number) {
   const ox = x - cx, oz = z - cz, a = dx * dx + dz * dz, b = ox * dx + oz * dz;
+  const lower = base + radius, upper = base + CONFIG.soldier.height - radius;
+  const oy = y - Math.max(lower, Math.min(upper, y));
+  if (ox * ox + oy * oy + oz * oz <= radius * radius) return 0;
   let result = Infinity;
   if (a > 1e-10) {
     const disc = b * b - a * (ox * ox + oz * oz - radius * radius);
-    if (disc >= 0) { const t = Math.max(0, (-b - Math.sqrt(disc)) / a), h = y + dy * t - base; if (h >= radius && h <= CONFIG.soldier.height - radius) result = t; }
+    if (disc >= 0) { const t = (-b - Math.sqrt(disc)) / a, h = y + dy * t - base; if (t >= 0 && h >= radius && h <= CONFIG.soldier.height - radius) result = t; }
   }
   for (let end = 0; end < 2; end++) {
     const oy = y - base - (end ? CONFIG.soldier.height - radius : radius), dot = ox * dx + oy * dy + oz * dz;
@@ -369,9 +372,16 @@ export class BattleSimulation {
   private fire(i: number, target: number) {
     const gun = this.weaponFor(this.weapon[i]), x = this.x[i], z = this.z[i], y = this.y[i] + 0.7;
     const distance = Math.hypot(this.x[target] - x, this.z[target] - z, this.y[target] - this.y[i]);
-    if (distance > gun.range || distance < 1e-8) return;
+    if (distance > gun.range || distance < 1e-8) return false;
     const dx = (this.x[target] - x) / distance, dz = (this.z[target] - z) / distance, dy = (this.y[target] - this.y[i]) / distance;
-    let hit = -1, closest = this.navigation ? this.terrain.raycast(x, y, z, dx, dy, dz, gun.range) : gun.range;
+    // Cached sight only guides movement. A fresh terrain ray authorizes each shot.
+    const terrainHit = this.terrain.raycast(x, y, z, dx, dy, dz, distance);
+    if (terrainHit < distance - 1e-5) {
+      this.visible[i] = 0;
+      this.nextSearch[i] = Math.min(this.nextSearch[i], this.time);
+      return false;
+    }
+    let hit = -1, closest = distance;
     if (++this.beamQuery === 0xffffffff) { this.beamStamp.fill(0); this.beamQuery = 1; }
     // Traverse just the cells crossed by the beam. Neighboring cells account for circle radius.
     let cx = this.grid.column(x), cz = this.grid.row(z);
@@ -403,6 +413,7 @@ export class BattleSimulation {
     this.events.emit('shot', this.team[i] as Team, x, this.time);
     const muzzle = Math.min(0.44, closest);
     this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * closest);
+    return true;
   }
 
   private updateNavigation() {
@@ -499,13 +510,12 @@ export class BattleSimulation {
       if (this.hp[i] <= 0 || this.nextFire[i] > this.time) continue;
       const target = this.byId.get(this.target[i]);
       if (target !== undefined && this.hp[target] > 0 && this.team[target] !== this.team[i]
-        && Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) <= this.weaponFor(this.weapon[i]).range) this.fire(i, target);
-      else {
-        // Preserve each rifle's firing phase while approaching. Otherwise every expired
-        // cooldown fires together at first contact, despite a staggered deployment.
-        const interval = this.weaponFor(this.weapon[i]).interval;
-        this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
-      }
+        && (!this.navigation || this.visible[i])
+        && Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) <= this.weaponFor(this.weapon[i]).range
+        && this.fire(i, target)) continue;
+      // Preserve firing phases while approaching or covered, without firing into walls.
+      const interval = this.weaponFor(this.weapon[i]).interval;
+      this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
     }
     for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) this.damage(this.id[i], this.pendingDamage[i]);
     if (!this.alive[0] || !this.alive[1]) this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids';

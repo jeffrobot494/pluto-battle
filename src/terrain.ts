@@ -126,6 +126,7 @@ export class Terrain {
   /** Exact segment/triangle-height crossing, split at grid and triangle edges. */
   raycast(x: number, y: number, z: number, dx: number, dy: number, dz: number, limit: number) {
     this.rayQueries++;
+    if (Math.min(y, y + dy * limit) > this.maxHeight + 1e-7) return limit;
     let closest = limit, c = this.column(x), r = this.row(z), t = 0;
     const sx = dx >= 0 ? 1 : -1, sz = dz >= 0 ? 1 : -1;
     const deltaX = Math.abs(dx) > 1e-10 ? this.dx / Math.abs(dx) : Infinity, deltaZ = Math.abs(dz) > 1e-10 ? this.dz / Math.abs(dz) : Infinity;
