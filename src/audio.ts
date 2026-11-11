@@ -67,6 +67,7 @@ export class BattleAudio {
   private simulation?: BattleSimulation;
   private cursor = 0;
   private unavailable = false;
+  private isMuted = false;
   private disposed = false;
   private volumes = Object.fromEntries(SOUND_EFFECTS.map(effect => [effect.id, effect.volume])) as Record<SoundId, number>;
   private played = Object.fromEntries(SOUND_EFFECTS.map(effect => [effect.id, 0])) as Record<SoundId, number>;
@@ -83,6 +84,13 @@ export class BattleAudio {
   }
 
   get state() { return this.unavailable ? 'unavailable' : this.context?.state ?? 'locked'; }
+  get muted() { return this.isMuted; }
+  setMuted(muted: boolean) {
+    if (this.isMuted === muted) return;
+    this.isMuted = muted;
+    if (muted) this.stop();
+    this.onStateChange();
+  }
   getVolume(id: SoundId) { return this.volumes[id]; }
   setVolume(id: SoundId, volume: number) {
     if (!Number.isFinite(volume)) return;
@@ -94,7 +102,7 @@ export class BattleAudio {
 
   /** Called inside a pointer/key gesture, including the first touch on mobile. */
   async unlock() {
-    if (this.disposed || this.unavailable) return false;
+    if (this.disposed || this.unavailable || this.isMuted) return false;
     try {
       if (!this.context) {
         const context = this.context = new AudioContext({ latencyHint: 'interactive' });
@@ -132,7 +140,7 @@ export class BattleAudio {
     if (this.simulation !== sim) { this.reset(sim); return; }
     const events = sim.events, end = events.cursor;
     const start = Math.max(this.cursor, end - events.capacity); this.cursor = end;
-    if (!enabled || this.context?.state !== 'running') return;
+    if (!enabled || this.isMuted || this.context?.state !== 'running') return;
     // Reserve the mix for death cries before filling it with impacts and rifles.
     for (const kind of ['death', 'hit', 'shot'] as const) for (let n = start; n < end; n++) {
       const i = n % events.capacity;
@@ -147,7 +155,7 @@ export class BattleAudio {
 
   private play(id: SoundId, position: number, preview = false, rate = 1) {
     const context = this.context;
-    if (this.disposed || document.hidden || !context || context.state !== 'running' || this.volumes[id] === 0) return;
+    if (this.disposed || this.isMuted || document.hidden || !context || context.state !== 'running' || this.volumes[id] === 0) return;
     const now = context.currentTime;
     if (!preview && now < (this.nextPlay.get(id) ?? 0)) return;
     // Keep both mobile CPU cost and a 1,000-soldier battle's mix bounded.

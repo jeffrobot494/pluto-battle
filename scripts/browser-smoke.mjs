@@ -127,9 +127,20 @@ try {
   await phone.waitForFunction(() => window.__battle.sim.totalShots > 20, null, { timeout: 30000 });
   await phone.screenshot({ path: 'artifacts/combat-mobile.png' });
   await phone.tap('#pause'); assert.equal(await phone.evaluate(() => window.__battle.paused), true);
-  const phoneDistance = await phone.evaluate(() => window.__battle.renderer.controls.getDistance());
-  await phone.tap('#zoom-in'); assert.ok(await phone.evaluate(() => window.__battle.renderer.controls.getDistance()) < phoneDistance);
-  await phone.tap('#center');
+  for (const selector of ['.top-bar', '#zoom-in', '#zoom-out', '#center', '#explosion-toggle', '#pause span', '#restart span', '#tuning-toggle span']) {
+    assert.equal(await phone.locator(`${selector}:visible`).count(), 0, selector);
+  }
+  assert.deepEqual(await phone.locator('.battle-controls button:visible').evaluateAll(buttons => buttons.map(button => button.id)),
+    ['pause', 'restart', 'new-map', 'tuning-toggle', 'sound-mute']);
+  const toolbar = await phone.locator('.battle-controls').boundingBox();
+  const fps = await phone.locator('#diagnostics-toggle').boundingBox();
+  assert.ok(fps.y + fps.height <= toolbar.y && fps.x + fps.width === toolbar.x + toolbar.width);
+  await phone.tap('#tuning-toggle');
+  const panel = await phone.locator('#tuning-panel').boundingBox();
+  assert.ok(panel.y >= toolbar.y + toolbar.height);
+  await phone.tap('#close-tuning');
+  await phone.tap('#restart');
+  assert.equal(await phone.evaluate(() => window.__battle.paused), false);
   await phone.tap('#diagnostics-toggle'); await phone.selectOption('#deployment', '250'); await phone.tap('#apply-battle');
   assert.deepEqual(await phone.evaluate(() => Array.from(window.__battle.sim.alive)), [250, 250]);
   reports.mobileEmulation = await phone.evaluate(() => window.__battle.performance());

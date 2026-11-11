@@ -28,6 +28,7 @@ const icons = {
   focus: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4"/><circle cx="10" cy="10" r="2.5"/></svg>',
   stats: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 14h3l3-9 4 12 3-8h3"/></svg>',
   sound: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 8h3l4-4v12l-4-4H3zM13 7a5 5 0 0 1 0 6m3-9a9 9 0 0 1 0 12"/></svg>',
+  muted: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 8h3l4-4v12l-4-4H2zM12 7l6 6m0-6-6 6"/></svg>',
 };
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
@@ -50,7 +51,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <p id="explosion-status" class="explosion-status" role="status" hidden>Click or tap ground to detonate · drag to pan</p>
     <footer class="bottom-bar">
       <div class="battle-note"><span class="status-light"></span><div id="engagement-label">ARMIES ADVANCING<small>100 vs 100 · AUTOMATIC ENGAGEMENT</small></div></div>
-      <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart" title="Restart on this map (R)">${icons.restart}<span>Restart</span></button><button id="new-map" title="New battle on a new map (N)">${icons.map}<span>New map</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
+      <nav class="battle-controls" aria-label="Battle controls">
+        <button id="pause" class="primary" aria-label="Pause battle">${icons.pause}<span>Pause</span></button>
+        <button id="restart" aria-label="Restart on this map" title="Restart on this map (R)">${icons.restart}<span>Restart</span></button>
+        <button id="new-map" aria-label="New battle on a new map" title="New battle on a new map (N)">${icons.map}<span>New map</span></button>
+        <button id="center">${icons.focus}<span>Center view</span></button>
+        <button id="sound-mute" aria-label="Mute sound effects" aria-pressed="false">${icons.sound}</button>
+      </nav>
       <button id="diagnostics-toggle" class="performance-badge" aria-expanded="false" aria-controls="diagnostics" title="Performance and battle settings (D)">${icons.stats}<strong id="fps-label">—</strong><span>FPS</span></button>
     </footer>
     <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1 / 2 / 3 UPGRADE <span>·</span> S ARMY</div>
@@ -85,14 +92,22 @@ catch (error) { $('#error').hidden = false; $('#error').textContent = `The battl
 
 const audio = new BattleAudio(updateSoundStatus);
 const soundPanel = $<HTMLDetailsElement>('#sound-panel');
+const muteButton = $<HTMLButtonElement>('#sound-mute');
 
 function updateSoundStatus() {
   const state = audio.state;
+  muteButton.disabled = state === 'unavailable';
+  muteButton.setAttribute('aria-pressed', String(audio.muted));
+  muteButton.innerHTML = audio.muted || muteButton.disabled ? icons.muted : icons.sound;
   $('#sound-state').textContent = state === 'running' ? 'ON' : state === 'unavailable' ? 'UNAVAILABLE' : 'TAP TO ENABLE';
   $('#sound-status').textContent = state === 'running' ? 'Battle audio on. Preview a sound to tune its level.'
     : state === 'unavailable' ? 'Audio is unavailable in this browser. The battle can still run.'
       : 'Tap or press a key to enable audio.';
 }
+muteButton.addEventListener('click', () => {
+  audio.setMuted(!audio.muted);
+  if (!audio.muted) void audio.unlock();
+});
 for (const { id } of SOUND_EFFECTS) {
   const slider = $<HTMLInputElement>(`#volume-${id}`), level = $<HTMLOutputElement>(`#level-${id}`);
   slider.value = String(audio.getVolume(id)); level.value = `${slider.value}%`;
@@ -406,6 +421,21 @@ function closeOtherPanels() { if (!tuningPanel.element.hidden) { soundPanel.open
 function openTuning() { tuningPanel.toggle(); closeOtherPanels(); }
 function openEquipment() { if (tuningPanel.isPageOpen(equipmentTab.id)) tuningPanel.toggle(false); else tuningPanel.showPage(equipmentTab.id); closeOtherPanels(); }
 tuningPanel.toggleButton.addEventListener('click', closeOtherPanels);
+const mobileHud = matchMedia('(max-width: 600px), (max-width: 960px) and (max-height: 600px) and (pointer: coarse)');
+const battleApp = $('#battle-app');
+function layoutHud() {
+  battleApp.classList.toggle('mobile-hud', mobileHud.matches);
+  if (mobileHud.matches) {
+    muteButton.before(tuningPanel.toggleButton);
+    soundPanel.open = false;
+    if (explosionTesting) setExplosionTesting(false);
+  } else {
+    tuningPanel.element.before(tuningPanel.toggleButton);
+    audio.setMuted(false);
+  }
+}
+layoutHud();
+mobileHud.addEventListener('change', layoutHud, { signal: audioEvents.signal });
 $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
 document.addEventListener('keydown', event => {
   const typing = event.target instanceof Element && event.target.closest('input, select, textarea');

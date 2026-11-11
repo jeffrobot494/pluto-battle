@@ -90,15 +90,29 @@ try {
   const phone = await mobile.newPage(); phone.on('pageerror', error => errors.push(error.message));
   await phone.goto(url); await phone.waitForFunction(() => window.__battle?.ready);
   await phone.evaluate(() => window.__battle.setPaused(true));
-  await phone.tap('#sound-panel summary'); await phone.waitForFunction(() => window.__battle.audio.state === 'running');
+  assert.equal(await phone.locator('#sound-panel').isVisible(), false);
+  const mute = phone.locator('#sound-mute');
+  await mute.tap();
+  assert.equal(await mute.getAttribute('aria-pressed'), 'true');
+  assert.equal(await phone.evaluate(async () => {
+    const audio = window.__battle.audio;
+    await audio.preview('sectoidDeath');
+    return audio.snapshot().played.sectoidDeath;
+  }), 0);
+  await mute.tap();
+  assert.equal(await mute.getAttribute('aria-pressed'), 'false');
+  await phone.waitForFunction(() => window.__battle.audio.state === 'running');
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  for (const id of ids) assert.equal(await phone.locator(`#preview-${id}`).isVisible(), true);
-  await phone.tap('#preview-sectoidDeath');
-  assert.equal(await phone.evaluate(() => window.__battle.audio.snapshot().played.sectoidDeath), 1);
-  await phone.screenshot({ path: 'artifacts/sound-panel-mobile.png' });
+  assert.equal(await phone.evaluate(async () => {
+    const audio = window.__battle.audio;
+    await audio.preview('sectoidDeath');
+    return audio.snapshot().played.sectoidDeath;
+  }), 1);
+  await phone.screenshot({ path: 'artifacts/sound-toggle-mobile.png' });
   await phone.setViewportSize({ width: 320, height: 568 });
-  await phone.locator('#preview-sectoidDeath').scrollIntoViewIfNeeded(); await phone.tap('#preview-sectoidDeath');
-  const bounds = await phone.locator('#sound-panel').boundingBox();
+  await mute.tap();
+  assert.equal(await phone.evaluate(() => window.__battle.audio.snapshot().activeVoices), 0);
+  const bounds = await mute.boundingBox();
   assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 568);
   assert.deepEqual(errors, []);
   await writeFile('artifacts/audio-report.json', JSON.stringify({ passed: true, report, errors }, null, 2));

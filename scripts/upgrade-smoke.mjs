@@ -158,9 +158,9 @@ try {
   f = await fixture(mobile);
   const layout = await mobile.evaluate(() => {
     const box = s => document.querySelector(s).getBoundingClientRect().toJSON();
-    return { rail: box('#upgrade-menu'), zoom: box('.view-controls'), bar: box('.bottom-bar') };
+    return { rail: box('#upgrade-menu'), bar: box('.battle-controls') };
   });
-  assert.ok(layout.rail.right <= 412 && layout.rail.bottom < layout.zoom.top, JSON.stringify(layout));
+  assert.ok(layout.rail.right <= 412 && layout.rail.top >= layout.bar.bottom && layout.rail.bottom <= 915, JSON.stringify(layout));
   await mobile.tap('[data-target="sectoids"]');
   assert.equal(await mobile.evaluate(() => window.__battle.upgradeTarget), 'sectoids');
   await mobile.tap('[data-target="plutonians"]');

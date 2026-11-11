@@ -84,7 +84,10 @@ try {
   assert.deepEqual(await page.evaluate(() => ({ ...window.__battle.renderer.webgl.info.memory })), resources);
   const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   const phone = await mobileContext.newPage(); watch(phone); await phone.goto(url); await phone.waitForFunction(() => window.__battle?.ready);
-  point = await fixture(phone); await phone.tap('#explosion-toggle'); await phone.touchscreen.tap(point.x, point.y);
+  point = await fixture(phone);
+  assert.equal(await phone.locator('#explosion-toggle').isVisible(), false);
+  await phone.evaluate(() => window.__battle.setExplosionTesting(true));
+  await phone.touchscreen.tap(point.x, point.y);
   await phone.waitForFunction(() => window.__battle.sim.totalExplosions === 1);
   await phone.evaluate(() => { window.__battle.setPaused(true); window.__battle.step(5); });
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -96,7 +99,7 @@ try {
   await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: point.x - 60, y: point.y, id: 1 }, { x: point.x + 60, y: point.y, id: 2 }] });
   await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   assert.equal(await phone.evaluate(() => window.__battle.sim.totalExplosions), 1);
-  const hud = await phone.locator('#center').boundingBox();
+  const hud = await phone.locator('#pause').boundingBox();
   const hudTouch = { x: hud.x + hud.width / 2, y: hud.y + hud.height / 2, id: 3 };
   const fieldTouch = { x: point.x, y: point.y, id: 4 };
   await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [hudTouch] });
