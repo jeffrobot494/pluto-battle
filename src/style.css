@@ -350,3 +350,18 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .mobile-hud .upgrade-target { grid-column: 1; grid-row: 2; align-self: start; }
 .mobile-hud .upgrade-button { grid-row: 1 / -1; }
 .mobile-hud .upgrade-status { top: auto; right: 0; bottom: calc(100% + 6px); transform: none; max-width: min(260px, 100%); }
+
+/* Replay prototype: playback bar and the recorded player's taps. */
+.replay-bar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; max-width: calc(100% - 32px); padding: 8px 12px; border: 1px solid #ff857380; border-radius: 4px; background: #201924ee; backdrop-filter: blur(12px); font: 11px Consolas, monospace; letter-spacing: 0.06em; }
+.replay-badge { color: var(--red); letter-spacing: 0.18em; }
+.replay-speeds { display: flex; gap: 2px; }
+.replay-bar button { border: 1px solid #ffffff30; border-radius: 3px; background: #ffffff08; padding: 5px 8px; font-size: 11px; }
+.replay-bar button[aria-pressed="true"] { background: #c1fa8626; border-color: var(--green); color: var(--green); }
+.replay-bar button:hover { background: #ffffff18; }
+#replay-sync { color: var(--green); }
+#replay-sync.desync { color: var(--red); }
+#replay-key { color: var(--muted); }
+.replay-taps { position: absolute; inset: 0; z-index: 29; pointer-events: none; overflow: hidden; }
+.replay-tap { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border: 2px solid #ffd76a; border-radius: 50%; background: #ffd76a40; animation: replay-tap 1.6s ease-out forwards; }
+.replay-tap span { position: absolute; left: 40px; top: 6px; white-space: nowrap; font: 11px Consolas, monospace; color: #ffd76a; text-shadow: 0 1px 3px #000; }
+@keyframes replay-tap { 0% { transform: scale(0.4); opacity: 1; } 25% { transform: scale(1); } 100% { transform: scale(1.1); opacity: 0; } }
