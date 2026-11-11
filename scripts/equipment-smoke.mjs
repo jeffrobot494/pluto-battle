@@ -7,6 +7,10 @@ const candidate = `${process.env.USERPROFILE}/AppData/Local/ms-playwright/chromi
 const executablePath = process.env.BATTLE_CHROMIUM ?? (existsSync(candidate) ? candidate : undefined);
 const browser = await chromium.launch({ executablePath, args: ['--use-angle=d3d11', '--force_high_performance_gpu'] });
 const url = process.env.BATTLE_URL ?? 'http://localhost:5180/';
+async function tune(target, key, value) {
+  const group = await target.locator(`[data-control="${key}"]`).getAttribute('data-group');
+  await target.click(`[data-tab="${group}"]`); await target.locator(`[data-tuning-key="${key}"]`).fill(String(value));
+}
 const errors = [], report = {};
 const all = [{ rifle: 100, sniper: 100, shotgun: 100 }, { rifle: 100, sniper: 100, shotgun: 100 }];
 const countWeapons = () => {
@@ -61,12 +65,12 @@ try {
   assert.equal(await page.evaluate(() => window.__battle.paused), true);
   await page.click('#tuning-toggle');
   assert.equal(await page.locator('#equipment-panel').isVisible(), false);
-  await page.locator('[data-tuning-key="count"]').fill('7');
-  await page.locator('[data-tuning-key="damage"]').fill('12');
+  await tune(page, 'count', '7');
+  await tune(page, 'damage', '12');
   await page.click('#equipment-toggle');
   assert.equal(await page.locator('#equip-count-0-sniper').textContent(), '1 / 7 soldiers');
   assert.match(await page.locator('#equipment-stats-rifle').textContent(), /12 DMG/);
-  await page.click('#tuning-toggle'); await page.locator('[data-tuning-key="halfDepth"]').fill('8');
+  await page.click('#tuning-toggle'); await tune(page, 'halfDepth', '8');
   await page.click('#equipment-toggle'); await page.click('#deploy-equipment');
   assert.equal(await page.locator('#equipment-panel').isVisible(), false);
   assert.equal(await page.locator('#tuning-panel').isVisible(), true);
