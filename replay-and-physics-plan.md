@@ -56,8 +56,20 @@
     ~10 s.
   - Switch to the Files API (private, up to 50 MB, paid from creator storage) only if replays
     outgrow this.
-- **Index:** send an analytics event `replay_saved {key, battle, ticks, outcome}`. The pipeline
-  stamps it with `profile_id`.
+- **Index of players with replays: a hidden leaderboard** (decided 2026-11-11).
+  - Analytics can't serve as the index. All 25 `rundot analytics export` queries return totals
+    only (counts, percentiles, funnels), with no per-player rows. Storage is per-player only, so
+    there is no game-wide list to write to.
+  - Add a `replays` board in `rundot/leaderboard.config.json`, with alltime period and higher score
+    ranking first. The game never shows it.
+  - When a replay is saved, submit score = current time in minutes (about 29M, under the
+    999,999,999 cap), so the newest players come first. `metadata` carries
+    `{ replayKeys, battles, lastScreen }`.
+  - The game can submit once per 60 s per player; submit on save and skip if the cooldown is
+    still running.
+  - Developer side: `rundot leaderboard scores replays --limit 500 --save players.json` gives the
+    profile IDs.
+- **Analytics events:** still send `replay_saved {key, battle, ticks, outcome}` for totals.
 - **Where players quit:** send the `session_end {screen, trigger, duration_seconds}` event.
   RUN's `session_end_summary_30d` export reports from it (`ANALYTICS.md:95`).
 - **Developer side:** the creator CLI can read any player's data:
@@ -66,23 +78,46 @@
   - (`cli-reference.md:463-505`)
   - A `scripts/fetch-replays.mjs` script pulls replays into a gitignored `replays/` folder for
     the viewer.
-- **To verify first:** whether `rundot analytics export` shows per-event rows with `profile_id`.
-  It may only give aggregates. That is how we find out which players to pull.
-  - If it only gives aggregates, keep a player index another way. For example, maintain a
-    "players with replays" list.
+  - The script reads `players.json` from the leaderboard, then runs `rundot storage get <id> <key>`
+    for each key in each entry's `replayKeys`.
 - **Privacy:** check what RUN.world's terms say about recording player sessions, and disclose it.
   Snapshots contain player personal data (PII), so keep `replays/` out of git.
 
-### 4. Viewer
-- A dev-only route (`?replay=<url>`) that loads a replay.
+### 4. Session log: menus as well as battles (decided 2026-11-11)
+- The menus are important too, so a replay covers the whole session, from launch to quit, as one
+  timeline. Battles are segments inside it.
+- **Header:** the player's save snapshot at launch, the build version and the screen size.
+- **Events, each stamped with ms since launch:**
+  - Every tap: normalized position, the hit element's id/label and the current screen. This
+    includes taps that hit nothing, which show confusion.
+  - Every menu action: open or close a screen, buy an upgrade, equip an item, change the roster,
+    start a battle.
+  - Battle segments: the battle replay from sections 1–2, embedded by reference.
+  - Session end: screen, and trigger (hidden, pause or quit).
+- **Refactor:** route every menu state change through one recordable `dispatchMenuAction()`. This
+  covers `upgrade-menu.ts`, `soldiers-panel.ts`, `equipment-panel.ts` and the handlers in
+  `main.ts`. It is the menu-side counterpart of the battle `Command` work.
+- Record meaning, not pixels. That keeps a session to tens of KB and makes it work across screen
+  sizes.
+- **Rejected:** rrweb DOM recording. It needs less code, but it captures the 3D canvas poorly,
+  produces much larger files (risking the 1 MB per-value limit), and battles would still need their
+  own format.
+- Saved with the same chunking, keys and ring as battle replays (section 3).
+
+### 5. Viewer
+- A dev-only route (`?replay=<url>`) that loads a session.
+- **Menus:** rebuild the real menu panels from the save snapshot, then apply the recorded menu
+  actions in time. Draw finger dots for taps, so taps on nothing stand out.
+- **Battles:** play the embedded battle replay inline.
 - It runs the sim at 0.5–8x speed with the normal renderer and a free camera, plus a timeline
   scrubber. To scrub, re-simulate from tick 0, or keep periodic snapshots.
 - It shows a "desync at tick N" banner if a checksum does not match.
 
-### 5. Funnel analytics, outside battles
+### 6. Funnel analytics
 - Use `RundotGameAPI.analytics` custom events and funnel steps for screens, upgrades, the roster,
   battle start/end and quits.
-- Battle replays show *how* a player gave up. The funnel shows *where*.
+- Session replays show *how* a player gave up. The funnel shows *where*, totalled across all
+  players.
 
 ## Part 2: Physics engine evaluation
 
