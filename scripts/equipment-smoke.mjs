@@ -11,6 +11,12 @@ async function tune(target, key, value) {
   const group = await target.locator(`[data-control="${key}"]`).getAttribute('data-group');
   await target.click(`[data-tab="${group}"]`); await target.locator(`[data-tuning-key="${key}"]`).fill(String(value));
 }
+// Equipment is a tab of the tuning panel.
+async function openEquipment(target, tap = false) {
+  if (!(await target.locator('#tuning-panel').isVisible())) await (tap ? target.tap('#tuning-toggle') : target.click('#tuning-toggle'));
+  await (tap ? target.tap('[data-page-tab="equipment"]') : target.click('[data-page-tab="equipment"]'));
+}
+const equipmentOpen = target => target.evaluate(() => !document.querySelector('#tuning-panel').hidden && document.querySelector('[data-page-tab="equipment"]').getAttribute('aria-selected') === 'true');
 const errors = [], report = {};
 const all = [{ rifle: 100, sniper: 100, shotgun: 100 }, { rifle: 100, sniper: 100, shotgun: 100 }];
 const countWeapons = () => {
@@ -28,28 +34,28 @@ try {
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto(url); await page.waitForFunction(() => window.__battle?.ready);
   await page.evaluate(() => window.__battle.setPaused(true));
-  assert.equal(await page.locator('#equipment-panel').isVisible(), false);
-  await page.click('#equipment-toggle');
+  assert.equal(await equipmentOpen(page), false);
+  await openEquipment(page);
   assert.equal(await page.locator('[data-equipment-item]').count(), 6);
   await page.locator('#equip-0-sniper').fill('10');
   await page.locator('#equip-0-shotgun').fill('25');
   await page.locator('#equip-1-sniper').fill('100');
   assert.equal(await page.locator('#equip-count-0-sniper').textContent(), '10 / 100 soldiers');
   assert.equal(await page.evaluate(() => window.__battle.sim.equipment[0].sniper), 0);
-  assert.match(await page.locator('#equipment-status').textContent(), /changes ready/i);
-  await page.locator('.equipment-scroll').evaluate(e => { e.scrollTop = 0; });
+  assert.match(await page.locator('#tuning-status').textContent(), /changes ready/i);
+  await page.locator('#tuning-scroll').evaluate(e => { e.scrollTop = 0; });
   await page.screenshot({ path: 'artifacts/equipment-desktop.png' });
   // Two invalid fields stay invalid independently; a deployment cannot silently use older valid values.
   await page.locator('#equip-0-rifle').fill('101'); await page.locator('#equip-1-shotgun').fill('0.5');
-  assert.equal(await page.locator('#deploy-equipment').isDisabled(), true);
+  assert.equal(await page.locator('#deploy-tuning').isDisabled(), true);
   await page.locator('#equip-0-rifle').fill('100');
-  assert.equal(await page.locator('#deploy-equipment').isDisabled(), true);
+  assert.equal(await page.locator('#deploy-tuning').isDisabled(), true);
   assert.equal(await page.evaluate(() => window.__battle.restart()), false);
   await page.locator('#equip-1-shotgun').fill('');
-  assert.equal(await page.locator('#deploy-equipment').isDisabled(), true);
+  assert.equal(await page.locator('#deploy-tuning').isDisabled(), true);
   await page.locator('#equip-1-shotgun').fill('0');
-  assert.equal(await page.locator('#deploy-equipment').isDisabled(), false);
-  await page.click('#deploy-equipment'); await page.evaluate(() => window.__battle.setPaused(true));
+  assert.equal(await page.locator('#deploy-tuning').isDisabled(), false);
+  await page.click('#deploy-tuning'); await page.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await page.evaluate(countWeapons), [[100, 10, 25], [100, 100, 0]]);
   const recipients = await page.evaluate(() => Array.from(window.__battle.sim.inventory));
   await page.click('#restart'); await page.evaluate(() => window.__battle.setPaused(true));
@@ -58,36 +64,37 @@ try {
   await page.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await page.evaluate(countWeapons), [[100, 10, 25], [100, 100, 0]]);
   assert.deepEqual(await page.evaluate(() => Array.from(window.__battle.sim.inventory)), recipients);
-  await page.click('#equipment-toggle');
+  await openEquipment(page);
   await page.locator('[data-equipment-range="sniper"][data-team="0"]').focus();
   await page.keyboard.press('ArrowRight');
   assert.equal(await page.locator('#equip-0-sniper').inputValue(), '11');
   assert.equal(await page.evaluate(() => window.__battle.paused), true);
-  await page.click('#tuning-toggle');
-  assert.equal(await page.locator('#equipment-panel').isVisible(), false);
   await tune(page, 'count', '7');
+  assert.equal(await equipmentOpen(page), false);
   await tune(page, 'damage', '12');
-  await page.click('#equipment-toggle');
+  await openEquipment(page);
   assert.equal(await page.locator('#equip-count-0-sniper').textContent(), '1 / 7 soldiers');
   assert.match(await page.locator('#equipment-stats-rifle').textContent(), /12 DMG/);
-  await page.click('#tuning-toggle'); await tune(page, 'halfDepth', '8');
-  await page.click('#equipment-toggle'); await page.click('#deploy-equipment');
-  assert.equal(await page.locator('#equipment-panel').isVisible(), false);
-  assert.equal(await page.locator('#tuning-panel').isVisible(), true);
+  await tune(page, 'halfDepth', '8');
+  // A tuning deployment error blocks the shared New battle button, even from the Equipment tab.
+  await openEquipment(page); assert.equal(await page.locator('#deploy-tuning').isDisabled(), true);
   assert.match(await page.locator('#tuning-status').textContent(), /deeper/i);
   await page.click('#reset-tuning'); await page.click('#deploy-tuning');
   await page.evaluate(() => window.__battle.setPaused(true));
-  await page.click('#equipment-toggle');
+  await openEquipment(page);
   assert.equal(await page.evaluate(values => window.__battle.setEquipment(values), all), true);
-  await page.click('#deploy-equipment'); await page.evaluate(() => window.__battle.setPaused(true));
+  await page.click('#deploy-tuning'); await page.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await page.evaluate(countWeapons), [[100, 100, 100], [100, 100, 100]]);
   assert.equal(await page.evaluate(() => Array.from(window.__battle.sim.inventory.slice(0, 200)).every(v => v === 13)), true);
   assert.equal(await page.evaluate(() => Array.from(window.__battle.sim.weapon.slice(0, 200)).every(v => v === 2)), true);
   await page.screenshot({ path: 'artifacts/equipment-all-weapons.png' });
-  await page.click('#close-equipment');
+  await page.fill('#tuning-filter', 'shotgun');
+  assert.deepEqual(await page.locator('.equipment-item:visible').evaluateAll(e => e.map(x => x.dataset.item)), ['shotgun']);
+  await page.fill('#tuning-filter', '');
+  await page.click('#close-tuning');
   await page.evaluate(() => document.activeElement.blur());
-  await page.keyboard.press('e'); assert.equal(await page.locator('#equipment-panel').isVisible(), true);
-  await page.keyboard.press('Escape'); assert.equal(await page.locator('#equipment-panel').isVisible(), false);
+  await page.keyboard.press('e'); assert.equal(await equipmentOpen(page), true);
+  await page.keyboard.press('Escape'); assert.equal(await page.locator('#tuning-panel').isVisible(), false);
   const resources = await page.evaluate(() => ({ ...window.__battle.renderer.webgl.info.memory }));
   // Sustain mixed combat for a real frame sample; stress deployment is checked separately.
   report.performance = await page.evaluate(async () => {
@@ -109,20 +116,20 @@ try {
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
   const phone = await mobile.newPage(); phone.on('pageerror', e => errors.push(e.message));
   await phone.goto(url); await phone.waitForFunction(() => window.__battle?.ready);
-  await phone.evaluate(() => window.__battle.setPaused(true)); await phone.tap('#equipment-toggle');
+  await phone.evaluate(() => window.__battle.setPaused(true)); await openEquipment(phone, true);
   await phone.locator('#equip-0-sniper').fill('10'); await phone.locator('#equip-1-shotgun').fill('30');
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await phone.locator('.equipment-scroll').evaluate(e => { e.scrollTop = 0; });
+  await phone.locator('#tuning-scroll').evaluate(e => { e.scrollTop = 0; });
   await phone.screenshot({ path: 'artifacts/equipment-mobile.png' });
-  await phone.locator('#deploy-equipment').tap(); await phone.evaluate(() => window.__battle.setPaused(true));
+  await phone.locator('#deploy-tuning').tap(); await phone.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await phone.evaluate(countWeapons), [[100, 10, 0], [100, 0, 30]]);
   await phone.setViewportSize({ width: 844, height: 390 });
-  assert.ok(await phone.locator('.equipment-scroll').evaluate(e => e.clientHeight) > 50);
+  assert.ok(await phone.locator('#tuning-scroll').evaluate(e => e.clientHeight) > 50);
   await phone.locator('#equip-1-shotgun').fill('100');
   await phone.screenshot({ path: 'artifacts/equipment-landscape.png' });
-  await phone.locator('#deploy-equipment').tap(); await phone.evaluate(() => window.__battle.setPaused(true));
+  await phone.locator('#deploy-tuning').tap(); await phone.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await phone.evaluate(countWeapons), [[100, 10, 0], [100, 0, 100]]);
-  await phone.locator('#reset-equipment').tap(); await phone.locator('#deploy-equipment').tap();
+  await phone.locator('#reset-equipment').tap(); await phone.locator('#deploy-tuning').tap();
   await phone.evaluate(() => window.__battle.setPaused(true));
   assert.deepEqual(await phone.evaluate(countWeapons), [[100, 0, 0], [100, 0, 0]]);
   assert.deepEqual(errors, []);

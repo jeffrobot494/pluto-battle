@@ -9,7 +9,7 @@ import { loadTuning, saveTuning, deploymentError } from './tuning.ts';
 import { TuningPanel } from './tuning-panel.ts';
 import { BattleAudio, SOUND_EFFECTS } from './audio.ts';
 import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from './equipment.ts';
-import { EquipmentPanel } from './equipment-panel.ts';
+import { EquipmentTab } from './equipment-panel.ts';
 import { prepareTerrain } from './navigation.ts';
 import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
@@ -75,7 +75,7 @@ const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.qu
 let tuning = loadTuning();
 let tuningPanel: TuningPanel;
 let equipment = loadEquipment();
-let equipmentPanel: EquipmentPanel;
+let equipmentTab: EquipmentTab;
 let renderer: BattleRenderer;
 try { renderer = new BattleRenderer($('#viewport'), tuning); }
 catch (error) { $('#error').hidden = false; $('#error').textContent = `The battlefield could not start. Enable WebGL and reload. ${error instanceof Error ? error.message : ''}`; throw error; }
@@ -101,7 +101,7 @@ const audioEvents = new AbortController();
 const unlockAudio = () => { if (!document.hidden) void audio.unlock(); };
 document.addEventListener('pointerdown', unlockAudio, { capture: true, signal: audioEvents.signal });
 document.addEventListener('keydown', unlockAudio, { capture: true, signal: audioEvents.signal });
-soundPanel.addEventListener('toggle', () => { if (soundPanel.open) { toggleDiagnostics(false); tuningPanel?.toggle(false); equipmentPanel?.toggle(false); } });
+soundPanel.addEventListener('toggle', () => { if (soundPanel.open) { toggleDiagnostics(false); tuningPanel?.toggle(false); } });
 
 let perTeam = tuning.count, seed = tuning.seed;
 const parameters = new URLSearchParams(location.search);
@@ -221,7 +221,7 @@ const stateLabel = $('#state-label'), outcome = $('#outcome'), pauseButton = $('
 function toggleDiagnostics(force?: boolean) {
   const open = force ?? $('#diagnostics').hidden; $('#diagnostics').hidden = !open;
   $('#diagnostics-toggle').setAttribute('aria-expanded', String(open));
-  if (open) { soundPanel.open = false; tuningPanel?.toggle(false); equipmentPanel?.toggle(false); updateHud(); }
+  if (open) { soundPanel.open = false; tuningPanel?.toggle(false); updateHud(); }
 }
 function setPaused(value: boolean) {
   if (value) stopBenchmark('Benchmark stopped: battle paused.');
@@ -234,13 +234,13 @@ function setPaused(value: boolean) {
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
 function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
-  if (equipmentPanel && !equipmentPanel.valid) { tuningPanel.toggle(false); equipmentPanel.toggle(true); return false; }
+  if (equipmentTab && !equipmentTab.valid) { tuningPanel.showPage(equipmentTab.id); return false; }
   stopBenchmark('Benchmark stopped: new battle.');
   const candidate = { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
   tuning = candidate;
-  if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); equipmentPanel.toggle(false); tuningPanel.toggle(true); return false; }
+  if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); tuningPanel.toggle(true); return false; }
   perTeam = tuning.count; seed = tuning.seed;
   terrainSeed = nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
   prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
@@ -252,7 +252,7 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
   previousTime = 0; droppedSimulationSeconds = 0;
   saveTuning(tuning); tuningPanel.sync(tuning, sim.tuning);
-  saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, perTeam);
+  saveEquipment(equipment); equipmentTab.sync(equipment, sim.equipment, perTeam);
   $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
   outcome.hidden = true; setPaused(false); updateHud();
   return true;
@@ -368,18 +368,17 @@ $('#apply-battle').addEventListener('click', () => {
   const count = Number($<HTMLSelectElement>('#deployment').value);
   if (Number.isFinite(count)) restart(count, undefined, terrainSeed);
 });
+// In-mission settings live as tabs of the tuning panel (TUNING groups or TuningPage tabs), never as separate panels.
+equipmentTab = new EquipmentTab(equipment, tuning.count, values => { equipment = values; saveEquipment(equipment); });
+equipmentTab.updateRifle(sim.rifle);
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
   stopBenchmark('Benchmark stopped: tuning changed.');
-  tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentPanel?.updateCount(tuning.count); equipmentPanel?.updateRifle(sim.rifle); updateHud();
-}, () => restartMap());
-equipmentPanel = new EquipmentPanel($('#battle-app'), equipment, tuning.count, values => {
-  equipment = values; saveEquipment(equipment);
-}, () => restartMap());
-equipmentPanel.updateRifle(sim.rifle);
-function openTuning() { tuningPanel.toggle(); if (!tuningPanel.element.hidden) { soundPanel.open = false; equipmentPanel.toggle(false); toggleDiagnostics(false); } }
-function openEquipment() { equipmentPanel.toggle(); if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } }
-tuningPanel.toggleButton.addEventListener('click', () => { if (!tuningPanel.element.hidden) { soundPanel.open = false; equipmentPanel.toggle(false); toggleDiagnostics(false); } });
-equipmentPanel.toggleButton.addEventListener('click', () => { if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } });
+  tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentTab.updateCount(tuning.count); equipmentTab.updateRifle(sim.rifle); updateHud();
+}, () => restartMap(), [equipmentTab]);
+function closeOtherPanels() { if (!tuningPanel.element.hidden) { soundPanel.open = false; toggleDiagnostics(false); } }
+function openTuning() { tuningPanel.toggle(); closeOtherPanels(); }
+function openEquipment() { if (tuningPanel.isPageOpen(equipmentTab.id)) tuningPanel.toggle(false); else tuningPanel.showPage(equipmentTab.id); closeOtherPanels(); }
+tuningPanel.toggleButton.addEventListener('click', closeOtherPanels);
 $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
 document.addEventListener('keydown', event => {
   const typing = event.target instanceof Element && event.target.closest('input, select, textarea');
@@ -394,7 +393,7 @@ document.addEventListener('keydown', event => {
   if (event.code === 'KeyT') openTuning();
   if (event.code === 'KeyE') openEquipment();
   if (event.code === 'KeyC') renderer.resetCamera();
-  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); equipmentPanel.toggle(false); upgradeMenu.select(null); selectSoldier(0); }
+  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); upgradeMenu.select(null); selectSoldier(0); }
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopBenchmark('Benchmark stopped: page hidden.');
@@ -461,7 +460,7 @@ const api = {
   get equipment() { return copyEquipment(equipment); },
   setEquipment(values: EquipmentSettings) {
     if (!validateEquipment(values)) return false;
-    equipment = copyEquipment(values); saveEquipment(equipment); equipmentPanel.sync(equipment, sim.equipment, tuning.count); return true;
+    equipment = copyEquipment(values); saveEquipment(equipment); equipmentTab.sync(equipment, sim.equipment, tuning.count); return true;
   },
   performance: performanceSnapshot,
   get timings() { return { simMs, renderMs, lastSimMs, lastRenderMs }; },
