@@ -18,6 +18,7 @@
     "test:terrain:browser": "node scripts/terrain-smoke.mjs",
     "test:browser:all": "node scripts/browser-regressions.mjs",
     "benchmark:terrain": "node scripts/terrain-benchmark.mjs",
+    "benchmark:compare": "node scripts/benchmark-compare.mjs",
     "test:terrain:campaign": "node --experimental-strip-types --no-warnings scripts/terrain-campaign.mjs",
     "test:cover:browser": "node scripts/cover-smoke.mjs",
     "test:explosions:browser": "node scripts/explosion-smoke.mjs",
