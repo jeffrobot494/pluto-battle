@@ -45,7 +45,7 @@ The battle starts automatically on a newly generated map. Every map is one of el
 - **Left-drag / one-finger drag:** pan. **Hold right-click and drag:** orbit the perspective camera.
 - **Tap / click a soldier:** select him. A ring marks him and a card above him shows his health and every gun he carries (the one in use is highlighted). Works for both armies; tap empty ground, × or Escape to deselect.
 - **Tap and hold (ground):** a circle grows from the held point, faster the longer you hold, with no size limit. Release to apply the armed action inside it. With nothing armed the circle is neutral white and does nothing. Moving more than a few pixels before the circle appears pans instead; a second finger cancels it.
-- **Upgrade rail (right edge) / 1 / 2:** arm **Sniper rifle** (range 24) or **Shotgun** (range 4); the toggles are exclusive and pressing the armed one disarms it. While armed, the circle takes the upgrade's color; releasing it adds the gun to every living Plutonian inside, and tapping a single Plutonian upgrades just him. Upgrades add to the soldier's inventory and he switches automatically to the best gun for the current range. Sectoids can be inspected but not upgraded. Upgrades are free for now, work while paused, and the toggle clears on restart.
+- **Upgrade rail (right edge) / 1 / 2 / 3:** arm **Sniper rifle** (range 24), **Shotgun** (range 4) or **Rocket launcher** (range 16, one rocket); the toggles are exclusive and pressing the armed one disarms it. While armed, the circle takes the upgrade's color; releasing it adds the gun to every living Plutonian inside, and tapping a single Plutonian upgrades just him. Upgrades add to the soldier's inventory and he switches automatically to the best gun for the current range. Sectoids can be inspected but not upgraded. Upgrades are free for now, work while paused, and the toggle clears on restart.
 - **Wheel / pinch / + / −:** zoom toward or away from the battlefield.
 - **Center view / C:** reset the camera.
 - **FPS badge / D:** diagnostics, adaptive quality controls, deployment presets through 500 vs 500, and the on-device performance capture.
@@ -66,10 +66,19 @@ Each item goes to `round(army size × percentage / 100)` randomly selected soldi
 | Laser rifle | 9 | 10.5 | 0.46 |
 | Sniper rifle | 60 | 24 | 1.8 |
 | Shotgun | 45 | 4 | 0.7 |
+| Rocket launcher | 35 (blast) | 16 | single use |
 
 Soldiers use the equipped weapon with the highest damage per second that can reach their target. With the default stats and all three weapons, they use a sniper at distance and a shotgun within 4 units. When nothing is in range they approach using their longest-range weapon; shotgun-only soldiers must move closer. Periodic target searches let soldiers notice closer threats. Switching retains the existing firing deadline, so it never grants a free shot. Live rifle tuning can change which weapon is preferred.
 
 All three weapons use single-target hitscan with the existing first-enemy-hit, friendly-fire and simultaneous-damage rules. Active guns have different barrel proportions, shot widths and firing pitches. The existing firing-volume control covers every weapon.
+
+### Rocket launcher
+
+The rocket launcher carries one rocket. A soldier fires it at the first chance: as soon as a visible enemy is within rocket range he switches to it ahead of every other gun, and while he still carries it he advances only to rocket range. He aims at the lowest point of the target he can see (feet first, then waist, then chest), so near misses still land at the target's feet. Like a laser, he holds fire and sidesteps when an ally is in the flight path, but he does not check who is inside the blast radius, including himself. After firing, the launcher leaves his inventory and he switches to his best remaining gun; a soldier whose only weapon was the rocket becomes unarmed. Upgrades and equipment can give him another launcher.
+
+The rocket flies in a straight line and explodes on the first soldier of either team or on terrain, using the Explosion Test blast (constant damage inside the radius, impulse falling off with distance). A rocket that hits nothing detonates after 1.5× rocket range; one that leaves the battlefield vanishes without a blast. Range, speed, blast radius, damage and impulse are live settings on the Tuning panel's **Rocket** tab.
+
+For performance, terrain impact is ray-cast once at launch (terrain is static), so flight only tests soldiers in nearby grid cells. At most 512 rockets fly at once; a soldier who can't launch keeps his rocket and retries. Rockets, exhaust flames and smoke puffs are each one instanced draw call, and smoke fades in the shader from a bounded ring buffer (half density on low quality).
 
 Recipients are fixed at deployment: casualties do not redistribute equipment. Independent random streams for each army/item make the same seed and settings reproduce the loadouts without changing formation randomness or another item's recipients. Change the battle seed in Tuning to shuffle recipients. Recipient previews round to whole soldiers, including zero when the army is too small for a low percentage.
 
@@ -116,7 +125,7 @@ battle.explode({ x: 0, y: 0, z: 0 });
 
 Spawns reject occupied, out-of-bounds, steep, or rock-blocked positions and full capacity. Existing IDs never identify replacements after a slot is reused. Weapon changes preserve cooldowns. Add `?terrain=189423` to reproduce the initial map and `?map=<type>` (for example `?map=canyon`) to pin every battle to one landscape type. `?flat=1` selects an explicit flat QA fixture. It is used by the old isolated browser assertions, not normal gameplay.
 
-`battle.sim.inventory[slot]` contains weapon ownership bits and `battle.sim.weapon[slot]` is the active weapon (`255` means unarmed). The existing `equip` command replaces that soldier's loadout with the requested weapon, preserving its cooldown. Explicit API spawns receive their requested weapon (laser rifle by default); percentage allocation applies to army deployment. `battle.equipment` returns a copy of pending percentages, and `battle.setEquipment([{ rifle: 100, sniper: 10, shotgun: 25 }, { rifle: 100, sniper: 0, shotgun: 50 }])` stages a validated loadout for the next restart.
+`battle.sim.inventory[slot]` contains weapon ownership bits and `battle.sim.weapon[slot]` is the active weapon (`255` means unarmed). The existing `equip` command replaces that soldier's loadout with the requested weapon, preserving its cooldown. Explicit API spawns receive their requested weapon (laser rifle by default); percentage allocation applies to army deployment. `battle.equipment` returns a copy of pending percentages, and `battle.setEquipment([{ rifle: 100, sniper: 10, shotgun: 25, rocket: 0 }, { rifle: 100, sniper: 0, shotgun: 50, rocket: 20 }])` stages a validated loadout for the next restart.
 
 ## Performance scope
 

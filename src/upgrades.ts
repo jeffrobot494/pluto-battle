@@ -11,6 +11,8 @@ export const UPGRADES = [
     icon: '<circle cx="10" cy="10" r="5.5"/><path d="M10 1.5v5M10 13.5v5M1.5 10h5M13.5 10h5"/>' },
   { id: 'shotgun', name: 'Shotgun', label: 'Shotgun', weapon: WEAPON_ID.shotgun, color: '#ffb35a', key: '2', cost: 0,
     icon: '<path d="M2 10h6M8 10l9-5.5M8 10h9.5M8 10l9 5.5"/>' },
+  { id: 'rocket', name: 'Rocket launcher', label: 'Rocket', weapon: WEAPON_ID.rocket, color: '#ff6b3d', key: '3', cost: 0,
+    icon: '<path d="M3 17l3-3M5 12l3 3M8 15l7.5-7.5c1.5-1.5 2-4 2-5.5-1.5 0-4 .5-5.5 2L4.5 11.5z"/><circle cx="13" cy="7" r="1.2"/>' },
 ] as const;
 export type Upgrade = typeof UPGRADES[number];
 export type UpgradeId = Upgrade['id'];

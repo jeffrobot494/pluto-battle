@@ -24,7 +24,7 @@ export class EquipmentTab implements TuningPage {
       <div class="equipment-armies"><span>Ⅰ PLUTONIANS</span><span>Ⅲ SECTOIDS</span></div>
       ${ARMY_ITEMS.map(item => {
         const gun = WEAPONS[item.weapon];
-        return `<section class="equipment-item" data-item="${item.id}" data-search-row="${item.name} equipment weapon ${item.id}"><h2>${item.name}<span id="equipment-stats-${item.id}">${gun.damage} DMG · ${gun.range} RANGE · ${gun.interval}s / SHOT</span></h2><div class="equipment-columns">${teams.map((team, index) => `
+        return `<section class="equipment-item" data-item="${item.id}" data-search-row="${item.name} equipment weapon ${item.id}"><h2>${item.name}<span id="equipment-stats-${item.id}">${gun.consumable ? `${gun.damage} BLAST DMG · ${gun.range} RANGE · 1 SHOT` : `${gun.damage} DMG · ${gun.range} RANGE · ${gun.interval}s / SHOT`}</span></h2><div class="equipment-columns">${teams.map((team, index) => `
           <div class="equipment-control"><label class="sr-only" for="equip-${index}-${item.id}">${item.name} — ${team} percentage</label>
             <div class="equipment-percent"><input id="equip-${index}-${item.id}" data-equipment-team="${index}" data-equipment-item="${item.id}" aria-describedby="equip-count-${index}-${item.id}" type="number" min="0" max="100" step="1" inputmode="numeric" value="${values[index][item.id]}"/><span>%</span></div>
             <input type="range" data-equipment-range="${item.id}" data-team="${index}" aria-label="${item.name} — ${team} percentage slider" min="0" max="100" step="1" value="${values[index][item.id]}"/>

@@ -3,7 +3,7 @@ import { readSetting, writeSetting } from './settings-store.ts';
 
 const SHORT_NAMES: Record<string, string> = {
   'Physics & explosions': 'Physics', 'Deployment': 'Deploy', 'Soldiers & weapons': 'Soldiers', 'Formation': 'Formation',
-  'Targeting': 'Target', 'Crowd steering': 'Crowd', 'Hit feedback': 'Hits', 'Camera': 'Camera',
+  'Targeting': 'Target', 'Crowd steering': 'Crowd', 'Hit feedback': 'Hits', 'Camera': 'Camera', 'Rocket launcher': 'Rocket',
 };
 const tabKey = 'pluto-battle-tuning-tab', helpKey = 'pluto-battle-tuning-help';
 /**

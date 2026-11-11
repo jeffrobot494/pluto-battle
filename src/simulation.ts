@@ -1,4 +1,4 @@
-import { CONFIG, NO_WEAPON, WEAPONS } from './config.ts';
+import { CONFIG, NO_WEAPON, WEAPON_ID, WEAPONS, type Weapon } from './config.ts';
 import { DEFAULT_TUNING, TUNING, deploymentError, type TuningValues } from './tuning.ts';
 import { ARMY_ITEMS, copyEquipment, defaultEquipment, recipientCount, validateEquipment, type EquipmentSettings } from './equipment.ts';
 import { random } from './random.ts';
@@ -6,11 +6,17 @@ import { Terrain } from './terrain.ts';
 import { Navigation } from './navigation.ts';
 import { rayCapsule, raySegmentCapsule } from './collision.ts';
 import { ExplosionEvents, validExplosion, type Explosion } from './explosions.ts';
+import { Rockets, SmokeEvents } from './rockets.ts';
 export { random } from './random.ts';
 export { rayCapsule } from './collision.ts';
 
 /** Cached line-of-sight refresh on a held target. Only guides movement; every shot casts its own ray. */
 const SIGHT_INTERVAL = 0.12;
+const ROCKET_BIT = 1 << WEAPON_ID.rocket;
+/** Rocket aim points above the target's feet, lowest first: a low miss still lands at his feet. */
+const ROCKET_AIM = [0.12, 0.4, 0.7];
+/** Rockets that hit nothing detonate after this multiple of rocket range. */
+const ROCKET_FUSE = 1.5;
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
@@ -203,6 +209,12 @@ export class BattleSimulation {
   readonly detourSide: Int8Array;
   readonly tuning: TuningValues;
   readonly rifle: { name: string; range: number; damage: number; interval: number };
+  /** Live rocket launcher stats (range from tuning). Its damage is the blast damage, shown for reference. */
+  readonly rocket: Weapon;
+  readonly rockets = new Rockets();
+  readonly smoke = new SmokeEvents();
+  totalRockets = 0;
+  droppedRockets = 0;
   readonly byId = new Map<number, number>();
   readonly commands: Command[] = [];
   readonly grid: SpatialGrid;
@@ -252,6 +264,7 @@ export class BattleSimulation {
     const error = perTeam === 0 ? null : deploymentError(this.tuning);
     if (error) throw new Error(error);
     this.rifle = { ...WEAPONS[0], range: this.tuning.range, damage: this.tuning.damage, interval: this.tuning.fireInterval };
+    this.rocket = { ...WEAPONS[WEAPON_ID.rocket], range: this.tuning.rocketRange, damage: this.tuning.rocketDamage };
     this.capacity = capacity;
     this.terrain = terrain ?? Terrain.flat(this.tuning.halfWidth, this.tuning.halfDepth);
     this.navigation = terrain ? navigation ?? new Navigation(terrain, this.tuning.radius) : null;
@@ -298,7 +311,7 @@ export class BattleSimulation {
     this.assignEquipment(perTeam, seed);
   }
 
-  weaponFor(index: number) { return index === 0 ? this.rifle : WEAPONS[index]; }
+  weaponFor(index: number): Weapon { return index === 0 ? this.rifle : index === WEAPON_ID.rocket ? this.rocket : WEAPONS[index]; }
   private updateDetourAngles() {
     for (let i = 0; i < 6; i++) { const angle = (i < 2 ? this.tuning.shallowAngle : i < 4 ? this.tuning.wideAngle : Math.PI / 2) * (i % 2 ? -1 : 1); this.detourCos[i] = Math.cos(angle); this.detourSin[i] = Math.sin(angle); }
   }
@@ -337,6 +350,8 @@ export class BattleSimulation {
 
   /** Range of the highest-DPS weapon carried (ties favor reach). Soldiers advance until this weapon can fire. */
   preferredRange(i: number) {
+    // A carried rocket is fired at the first chance, so close to rocket range first.
+    if (this.inventory[i] & ROCKET_BIT) return this.rocket.range;
     let range = 0, score = -Infinity;
     for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) {
       const gun = this.weaponFor(w), dps = gun.damage / gun.interval;
@@ -345,13 +360,14 @@ export class BattleSimulation {
     return range;
   }
 
-  /** Best DPS within reach; otherwise carry the longest-range weapon while approaching. */
+  /** A rocket within reach comes first; then best DPS within reach; otherwise carry the longest-range weapon while approaching. */
   selectWeapon(i: number, distance: number) {
+    if ((this.inventory[i] & ROCKET_BIT) && distance <= this.rocket.range) return WEAPON_ID.rocket;
     let best = NO_WEAPON, longest = NO_WEAPON, score = -Infinity, range = -Infinity;
     for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) {
       const gun = this.weaponFor(w), dps = gun.damage / gun.interval;
       if (gun.range > range) { range = gun.range; longest = w; }
-      if (distance <= gun.range && dps > score) { score = dps; best = w; }
+      if (w !== WEAPON_ID.rocket && distance <= gun.range && dps > score) { score = dps; best = w; }
     }
     return best === NO_WEAPON ? longest : best;
   }
@@ -361,6 +377,7 @@ export class BattleSimulation {
     for (const def of TUNING) if (!def.restart) this.tuning[def.key] = values[def.key];
     this.updateDetourAngles();
     this.rifle.range = this.tuning.range; this.rifle.damage = this.tuning.damage; this.rifle.interval = this.tuning.fireInterval;
+    this.rocket.range = this.tuning.rocketRange; this.rocket.damage = this.tuning.rocketDamage;
     for (let i = 0; i < this.used; i++) if (this.hp[i] > 0) {
       if (oldHealth !== this.tuning.health) this.hp[i] = Math.min(this.tuning.health, this.hp[i] * this.tuning.health / oldHealth);
       if (this.weapon[i] === 0 && oldInterval !== this.rifle.interval) this.nextFire[i] = this.time + Math.max(0, this.nextFire[i] - this.time) * this.rifle.interval / oldInterval;
@@ -533,6 +550,7 @@ export class BattleSimulation {
   }
 
   private fire(i: number, target: number) {
+    if (this.weapon[i] === WEAPON_ID.rocket) return this.launch(i, target);
     const gun = this.weaponFor(this.weapon[i]), x = this.x[i], z = this.z[i], y = this.y[i] + 0.7;
     const distance = Math.hypot(this.x[target] - x, this.z[target] - z, this.y[target] - this.y[i]);
     if (distance > gun.range || distance < 1e-8) return false;
@@ -544,6 +562,23 @@ export class BattleSimulation {
       this.nextSearch[i] = Math.min(this.nextSearch[i], this.time);
       return false;
     }
+    const closest = this.castBeam(i, x, y, z, dx, dy, dz, distance), hit = this.beamHit;
+    if (hit >= 0 && this.team[hit] === this.team[i]) { this.blockShot(i, hit, dx, dz); return false; }
+    this.blockedUntil[i] = 0;
+    if (this.flankState[i] === 3) this.flankState[i] = 0;
+    if (hit >= 0) this.pendingDamage[hit] += gun.damage;
+    this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
+    this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
+    this.aimPitch[i] = Math.atan2(dy, Math.hypot(dx, dz));
+    this.events.emit('shot', this.team[i] as Team, x, this.time, this.weapon[i]);
+    const muzzle = Math.min(0.44, closest);
+    this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * closest, this.weapon[i]);
+    return true;
+  }
+
+  private beamHit = -1;
+  /** First soldier (enemy, or ally while friendly blocking is on) along a ray from shooter i: slot in beamHit, distance returned. */
+  private castBeam(i: number, x: number, y: number, z: number, dx: number, dy: number, dz: number, distance: number) {
     let hit = -1, closest = distance;
     const blocking = this.friendlyBlocking;
     if (++this.beamQuery === 0xffffffff) { this.beamStamp.fill(0); this.beamQuery = 1; }
@@ -571,17 +606,76 @@ export class BattleSimulation {
       }
       if (tX < tZ) { t = tX; tX += deltaX; cx += sx; } else { t = tZ; tZ += deltaZ; cz += sz; }
     }
-    if (hit >= 0 && this.team[hit] === this.team[i]) { this.blockShot(i, hit, dx, dz); return false; }
+    this.beamHit = hit;
+    return closest;
+  }
+
+  /**
+   * Launches the soldier's single rocket at the lowest point of the target he can see. The lane is checked for
+   * allies exactly like a laser; allies (or the shooter) near the target are not considered. The launcher leaves his inventory.
+   */
+  private launch(i: number, target: number) {
+    if (this.rockets.count >= this.rockets.capacity) { this.droppedRockets++; return false; }
+    const x = this.x[i], z = this.z[i], y = this.y[i] + 0.7;
+    let dx = 0, dy = 0, dz = 0, distance = 0;
+    for (let n = 0; n < ROCKET_AIM.length && !distance; n++) {
+      const ax = this.x[target] - x, ay = this.y[target] + ROCKET_AIM[n] - y, az = this.z[target] - z, d = Math.hypot(ax, ay, az);
+      if (d < 1e-6) continue;
+      if (this.terrain.raycast(x, y, z, ax / d, ay / d, az / d, d) >= d - 1e-5) { dx = ax / d; dy = ay / d; dz = az / d; distance = d; }
+    }
+    if (!distance) { this.visible[i] = 0; this.nextSearch[i] = Math.min(this.nextSearch[i], this.time); return false; }
+    this.castBeam(i, x, y, z, dx, dy, dz, distance);
+    if (this.beamHit >= 0 && this.team[this.beamHit] === this.team[i]) { this.blockShot(i, this.beamHit, dx, dz); return false; }
     this.blockedUntil[i] = 0;
     if (this.flankState[i] === 3) this.flankState[i] = 0;
-    if (hit >= 0) this.pendingDamage[hit] += gun.damage;
-    this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
+    const muzzle = 0.44, mx = x + dx * muzzle, my = y + dy * muzzle, mz = z + dz * muzzle;
+    // Terrain is static: one raycast now gives the impact distance, so flight only tests soldiers.
+    const fuse = this.rocket.range * ROCKET_FUSE + 2;
+    let limit = this.terrain.raycast(mx, my, mz, dx, dy, dz, fuse), detonate = true;
+    const hw = this.grid.halfWidth, hd = this.grid.halfDepth;
+    const exitX = Math.abs(dx) > 1e-9 ? ((dx > 0 ? hw : -hw) - mx) / dx : Infinity;
+    const exitZ = Math.abs(dz) > 1e-9 ? ((dz > 0 ? hd : -hd) - mz) / dz : Infinity;
+    if (Math.min(exitX, exitZ) < limit) { limit = Math.max(0, Math.min(exitX, exitZ)); detonate = false; }
+    this.rockets.add(mx, my, mz, dx, dy, dz, limit, detonate, this.id[i], this.team[i]);
+    this.inventory[i] &= ~ROCKET_BIT; this.totalRockets++;
+    this.lastFire[i] = this.time; this.nextFire[i] = this.time + this.rocket.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
     this.aimPitch[i] = Math.atan2(dy, Math.hypot(dx, dz));
-    this.events.emit('shot', this.team[i] as Team, x, this.time, this.weapon[i]);
-    const muzzle = Math.min(0.44, closest);
-    this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * closest, this.weapon[i]);
+    this.events.emit('shot', this.team[i] as Team, x, this.time, WEAPON_ID.rocket);
+    this.weapon[i] = this.selectWeapon(i, Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]));
     return true;
+  }
+
+  /** Moves every rocket one tick. Soldiers of either team stop it; terrain, fuse and field edge were resolved at launch. */
+  private advanceRockets() {
+    const r = this.rockets, stride = this.tuning.rocketSpeed * CONFIG.step, grid = this.grid, reach = this.tuning.radius + 0.01;
+    for (let n = 0; n < r.count;) {
+      const x = r.x[n], y = r.y[n], z = r.z[n], dx = r.dx[n], dy = r.dy[n], dz = r.dz[n];
+      r.previousX[n] = x; r.previousY[n] = y; r.previousZ[n] = z;
+      let travel = Math.max(0, Math.min(stride, r.limit[n] - r.travelled[n])), struck = false;
+      const ex = x + dx * travel, ez = z + dz * travel;
+      const minX = grid.column(Math.min(x, ex) - reach), maxX = grid.column(Math.max(x, ex) + reach);
+      const minZ = grid.row(Math.min(z, ez) - reach), maxZ = grid.row(Math.max(z, ez) + reach);
+      for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
+        for (let j = grid.heads[row * grid.columns + col]; j >= 0; j = grid.next[j]) {
+          if (this.id[j] === r.owner[n]) continue;
+          const t = rayCapsule(x, y, z, dx, dy, dz, this.x[j], this.y[j], this.z[j], this.radius[j]);
+          if (t <= travel) { travel = t; struck = true; }
+        }
+      }
+      r.x[n] = x + dx * travel; r.y[n] = y + dy * travel; r.z[n] = z + dz * travel; r.travelled[n] += travel;
+      if (struck || r.travelled[n] >= r.limit[n] - 1e-6) {
+        if (struck || r.detonate[n]) this.explode({ x: r.x[n], y: r.y[n], z: r.z[n], radius: this.tuning.rocketRadius, damage: this.tuning.rocketDamage, impulse: this.tuning.rocketImpulse });
+        r.remove(n); continue;
+      }
+      // A puff about every 0.35 u keeps fast rockets' trails continuous.
+      const puffs = Math.min(4, Math.max(1, Math.ceil(travel / 0.35)));
+      for (let p = 1; p <= puffs; p++) {
+        const back = travel * (1 - p / puffs) + 0.2;
+        this.smoke.emit(r.x[n] - dx * back, r.y[n] - dy * back, r.z[n] - dz * back, this.time - (1 - p / puffs) * CONFIG.step);
+      }
+      n++;
+    }
   }
 
   /**
@@ -855,7 +949,8 @@ export class BattleSimulation {
     }
     this.applyCommands();
     this.integrateBodies();
-    if (this.result !== 'running') return;
+    // Rockets already in flight keep flying after the result; their blasts then only move bodies.
+    if (this.result !== 'running') { this.advanceRockets(); return; }
     for (let team = 0; team < 2; team++) if (this.alive[team]) { this.centerX[team] /= this.alive[team]; this.centerZ[team] /= this.alive[team]; }
     this.updateLines();
     // Caps waypoint selection so a sudden pile-up cannot spike a frame.
@@ -962,6 +1057,8 @@ export class BattleSimulation {
       const interval = this.weaponFor(this.weapon[i]).interval;
       this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
     }
+    // After firing, so a rocket that lands this tick adds its blast to the same simultaneous damage pass.
+    this.advanceRockets();
     for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) this.damage(this.id[i], this.pendingDamage[i]);
     if (!this.alive[0] || !this.alive[1]) { this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids'; this.endedAt = this.time; }
   }

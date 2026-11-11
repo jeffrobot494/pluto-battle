@@ -18,7 +18,7 @@ async function openEquipment(target, tap = false) {
 }
 const equipmentOpen = target => target.evaluate(() => !document.querySelector('#tuning-panel').hidden && document.querySelector('[data-page-tab="equipment"]').getAttribute('aria-selected') === 'true');
 const errors = [], report = {};
-const all = [{ rifle: 100, sniper: 100, shotgun: 100 }, { rifle: 100, sniper: 100, shotgun: 100 }];
+const all = [{ rifle: 100, sniper: 100, shotgun: 100, rocket: 0 }, { rifle: 100, sniper: 100, shotgun: 100, rocket: 0 }];
 const countWeapons = () => {
   const sim = window.__battle.sim;
   return [0, 1].map(team => [0, 2, 3].map(w => {
@@ -36,7 +36,7 @@ try {
   await page.evaluate(() => window.__battle.setPaused(true));
   assert.equal(await equipmentOpen(page), false);
   await openEquipment(page);
-  assert.equal(await page.locator('[data-equipment-item]').count(), 6);
+  assert.equal(await page.locator('[data-equipment-item]').count(), 8);
   await page.locator('#equip-0-sniper').fill('10');
   await page.locator('#equip-0-shotgun').fill('25');
   await page.locator('#equip-1-sniper').fill('100');

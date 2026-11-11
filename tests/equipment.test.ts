@@ -26,7 +26,7 @@ function duel(distance: number, inventory: number) {
 test('default loadouts retain standard rifles; percentages give exact, independently rounded counts', () => {
   const baseline = new BattleSimulation(100);
   assert.ok(baseline.inventory.slice(0, baseline.used).every(mask => mask === bit(WEAPON_ID.rifle)));
-  const settings: EquipmentSettings = [{ rifle: 100, sniper: 10, shotgun: 25 }, { rifle: 50, sniper: 100, shotgun: 0 }];
+  const settings: EquipmentSettings = [{ rifle: 100, sniper: 10, shotgun: 25, rocket: 0 }, { rifle: 50, sniper: 100, shotgun: 0, rocket: 0 }];
   const sim = new BattleSimulation(100, 1234, CONFIG.capacity, undefined, undefined, undefined, settings);
   assert.deepEqual([count(sim, 0, 0), count(sim, 0, 2), count(sim, 0, 3)], [100, 10, 25]);
   assert.deepEqual([count(sim, 1, 0), count(sim, 1, 2), count(sim, 1, 3)], [50, 100, 0]);
@@ -37,14 +37,14 @@ test('default loadouts retain standard rifles; percentages give exact, independe
 });
 
 test('100% of every item equips every soldier with all three weapons', () => {
-  const settings: EquipmentSettings = [{ rifle: 100, sniper: 100, shotgun: 100 }, { rifle: 100, sniper: 100, shotgun: 100 }];
+  const settings: EquipmentSettings = [{ rifle: 100, sniper: 100, shotgun: 100, rocket: 0 }, { rifle: 100, sniper: 100, shotgun: 100, rocket: 0 }];
   const sim = new BattleSimulation(100, 9, CONFIG.capacity, undefined, undefined, undefined, settings);
   assert.ok(sim.inventory.slice(0, sim.used).every(mask => mask === all));
   assert.ok(sim.weapon.slice(0, sim.used).every(w => w === WEAPON_ID.sniper));
 });
 
 test('recipients repeat by seed, vary across seeds, and do not perturb formations or other allocations', () => {
-  const settings: EquipmentSettings = [{ rifle: 100, sniper: 10, shotgun: 25 }, { rifle: 100, sniper: 30, shotgun: 50 }];
+  const settings: EquipmentSettings = [{ rifle: 100, sniper: 10, shotgun: 25, rocket: 0 }, { rifle: 100, sniper: 30, shotgun: 50, rocket: 0 }];
   const a = new BattleSimulation(100, 42, CONFIG.capacity, undefined, undefined, undefined, settings);
   const b = new BattleSimulation(100, 42, CONFIG.capacity, undefined, undefined, undefined, settings);
   const c = new BattleSimulation(100, 43, CONFIG.capacity, undefined, undefined, undefined, settings);
@@ -101,7 +101,7 @@ test('soldiers carrying a shotgun advance while snipers hold at long range', () 
 });
 
 test('unarmed armies stay unarmed, deaths do not redistribute, and reused slots reset inventory', () => {
-  const settings: EquipmentSettings = [{ rifle: 0, sniper: 0, shotgun: 0 }, { rifle: 0, sniper: 0, shotgun: 0 }];
+  const settings: EquipmentSettings = [{ rifle: 0, sniper: 0, shotgun: 0, rocket: 0 }, { rifle: 0, sniper: 0, shotgun: 0, rocket: 0 }];
   const sim = new BattleSimulation(3, 9, CONFIG.capacity, undefined, undefined, undefined, settings);
   for (let n = 0; n < 100; n++) sim.step();
   assert.equal(sim.totalShots, 0); assert.ok(sim.weapon.slice(0, sim.used).every(w => w === NO_WEAPON));
@@ -130,12 +130,12 @@ test('invalid allocations are rejected and persisted values recover independentl
   const valid = defaultEquipment(); valid[0].sniper = 10; valid[1].shotgun = 45;
   saveEquipment(valid); assert.deepEqual(loadEquipment(), valid);
   writeSetting(key, '[{"rifle":-1,"sniper":12,"shotgun":"50"},{"rifle":0,"sniper":101,"shotgun":75}]');
-  assert.deepEqual(loadEquipment(), [{ rifle: 100, sniper: 12, shotgun: 0 }, { rifle: 0, sniper: 0, shotgun: 75 }]);
+  assert.deepEqual(loadEquipment(), [{ rifle: 100, sniper: 12, shotgun: 0, rocket: 0 }, { rifle: 0, sniper: 0, shotgun: 75, rocket: 0 }]);
   writeSetting(key, 'broken'); assert.deepEqual(loadEquipment(), defaultEquipment());
 });
 
 test('mixed-loadout battles reproduce combat and finish', () => {
-  const settings: EquipmentSettings = [{ rifle: 100, sniper: 25, shotgun: 60 }, { rifle: 100, sniper: 25, shotgun: 60 }];
+  const settings: EquipmentSettings = [{ rifle: 100, sniper: 25, shotgun: 60, rocket: 0 }, { rifle: 100, sniper: 25, shotgun: 60, rocket: 0 }];
   const a = new BattleSimulation(100, 12, CONFIG.capacity, undefined, undefined, undefined, settings);
   const b = new BattleSimulation(100, 12, CONFIG.capacity, undefined, undefined, undefined, settings);
   for (let n = 0; n < 12000 && a.result === 'running'; n++) { a.step(); b.step(); }

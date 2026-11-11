@@ -6,6 +6,7 @@ export const ARMY_ITEMS = [
   { id: 'rifle', name: 'Laser rifle', weapon: WEAPON_ID.rifle, defaultPercent: 100 },
   { id: 'sniper', name: 'Sniper rifle', weapon: WEAPON_ID.sniper, defaultPercent: 0 },
   { id: 'shotgun', name: 'Shotgun', weapon: WEAPON_ID.shotgun, defaultPercent: 0 },
+  { id: 'rocket', name: 'Rocket launcher', weapon: WEAPON_ID.rocket, defaultPercent: 0 },
 ] as const;
 export type ItemId = typeof ARMY_ITEMS[number]['id'];
 export type ArmyEquipment = Record<ItemId, number>;

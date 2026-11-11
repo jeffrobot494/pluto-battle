@@ -37,6 +37,10 @@ export class BattleRenderer {
   readonly blastSparks: THREE.InstancedMesh;
   readonly blastTimes: THREE.InstancedBufferAttribute;
   readonly blastPreview: THREE.Mesh;
+  readonly rocketBodies: THREE.InstancedMesh;
+  readonly rocketFlames: THREE.InstancedMesh;
+  readonly smokePuffs: THREE.InstancedMesh;
+  readonly smokeTimes: THREE.InstancedBufferAttribute;
   readonly selectionRing: THREE.Mesh;
   readonly upgradePulses: THREE.InstancedMesh;
   readonly zoneFill: THREE.Mesh;
@@ -132,6 +136,26 @@ export class BattleRenderer {
     blastMaterial.customProgramCacheKey = () => 'pluto-blast-v1';
     this.blastSpheres = this.instances(blastGeometry, blastMaterial, CONFIG.explosion.effects);
     this.blastSparks = this.instances(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: '#ffb058', toneMapped: false }), CONFIG.explosion.effects * 8);
+    // Rockets: a small finned-less body (lathe profile, nose toward +Z) and an additive exhaust flame. One draw call each.
+    const rocketShape = new THREE.LatheGeometry([new THREE.Vector2(0, -0.2), new THREE.Vector2(0.05, -0.2), new THREE.Vector2(0.05, 0.1), new THREE.Vector2(0.035, 0.17), new THREE.Vector2(0, 0.22)], 6).rotateX(Math.PI / 2);
+    this.rocketBodies = this.instances(rocketShape, new THREE.MeshStandardMaterial({ color: '#ddd5cc', roughness: 0.5, metalness: 0.35 }), CONFIG.rocket.maxInFlight);
+    this.rocketFlames = this.instances(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: '#ffb347', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), CONFIG.rocket.maxInFlight);
+    this.rocketFlames.renderOrder = 3;
+    // Smoke fades in the shader from a per-puff birth time, so puffs never need colour uploads.
+    const smokeGeometry = new THREE.IcosahedronGeometry(1, 0);
+    this.smokeTimes = new THREE.InstancedBufferAttribute(new Float32Array(CONFIG.rocket.smoke), 1);
+    this.smokeTimes.setUsage(THREE.DynamicDrawUsage); smokeGeometry.setAttribute('aSmokeAt', this.smokeTimes);
+    const smokeMaterial = new THREE.MeshBasicMaterial({ color: '#cbbfc6', transparent: true, opacity: 0.5, depthWrite: false });
+    smokeMaterial.onBeforeCompile = shader => {
+      shader.uniforms.uBattleTime = this.uniforms.time;
+      shader.vertexShader = 'attribute float aSmokeAt; varying float vSmokeAt;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSmokeAt = aSmokeAt;');
+      shader.fragmentShader = 'uniform float uBattleTime; varying float vSmokeAt;\n' + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>\nfloat smokeLife = clamp((uBattleTime - vSmokeAt) / ${CONFIG.rocket.smokeLife.toFixed(3)}, 0.0, 1.0);\ndiffuseColor.rgb *= 1.0 - 0.35 * (1.0 - smokeLife);\ndiffuseColor.a *= (1.0 - smokeLife) * (1.0 - smokeLife);`);
+    };
+    smokeMaterial.customProgramCacheKey = () => 'pluto-smoke-v1';
+    this.smokePuffs = this.instances(smokeGeometry, smokeMaterial, CONFIG.rocket.smoke);
+    this.smokePuffs.renderOrder = 2;
     this.blastSpheres.renderOrder = 3;
     this.blastPreview = new THREE.Mesh(new THREE.RingGeometry(0.98, 1, 64), new THREE.MeshBasicMaterial({ color: '#ffd184', transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }));
     this.blastPreview.rotation.x = -Math.PI / 2; this.blastPreview.visible = false; this.scene.add(this.blastPreview);
@@ -366,6 +390,7 @@ export class BattleRenderer {
       if (weapon === NO_WEAPON) this.dummy.scale.setScalar(0);
       else if (weapon === WEAPON_ID.sniper) this.dummy.scale.set(fade * 0.8, fade * 0.85, fade * 1.7);
       else if (weapon === WEAPON_ID.shotgun) this.dummy.scale.set(fade * 1.8, fade * 1.25, fade * 0.7);
+      else if (weapon === WEAPON_ID.rocket) this.dummy.scale.set(fade * 1.6, fade * 1.4, fade * 1.25);
       this.dummy.rotation.set(-sim.aimPitch[i], yaw, fall * Math.PI / 2, 'YXZ'); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
       this.dummy.scale.setScalar(fade);
       this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], groundY + 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
@@ -444,7 +469,31 @@ export class BattleRenderer {
     this.blastSpheres.count = blasts; this.blastSparks.count = debris; this.activeExplosions = blasts;
     if (blasts) { this.blastTimes.clearUpdateRanges(); this.blastTimes.addUpdateRange(0, blasts); this.blastTimes.needsUpdate = true; this.upload(this.blastSpheres); }
     if (debris) this.upload(this.blastSparks);
-    this.activeEffects = beams + sparks + flashes + blasts + debris;
+    const rockets = sim.rockets;
+    for (let n = 0; n < rockets.count; n++) {
+      const dx = rockets.dx[n], dy = rockets.dy[n], dz = rockets.dz[n];
+      const x = THREE.MathUtils.lerp(rockets.previousX[n], rockets.x[n], alpha), y = THREE.MathUtils.lerp(rockets.previousY[n], rockets.y[n], alpha), z = THREE.MathUtils.lerp(rockets.previousZ[n], rockets.z[n], alpha);
+      this.beamDirection.set(dx, dy, dz); this.dummy.quaternion.setFromUnitVectors(this.beamAxis, this.beamDirection);
+      this.dummy.position.set(x, y, z); this.dummy.scale.setScalar(1); this.dummy.updateMatrix(); this.rocketBodies.setMatrixAt(n, this.dummy.matrix);
+      const flicker = 0.075 + 0.03 * Math.sin(visualTime * 70 + n * 1.9);
+      this.dummy.position.set(x - dx * 0.25, y - dy * 0.25, z - dz * 0.25); this.dummy.scale.set(flicker, flicker, flicker * 2.2);
+      this.dummy.updateMatrix(); this.rocketFlames.setMatrixAt(n, this.dummy.matrix);
+    }
+    this.rocketBodies.count = this.rocketFlames.count = rockets.count;
+    if (rockets.count) { this.upload(this.rocketBodies); this.upload(this.rocketFlames); }
+    let puffs = 0;
+    const smoke = sim.smoke, life = CONFIG.rocket.smokeLife, thin = this.quality === 'low';
+    // Only scan when puffs can still be alive; an idle battle skips the loop entirely.
+    if (visualTime - smoke.at[(smoke.cursor + smoke.capacity - 1) % smoke.capacity] < life) for (let i = 0; i < smoke.capacity; i++) {
+      const age = visualTime - smoke.at[i];
+      if (age < 0 || age >= life || (thin && i % 2)) continue;
+      this.dummy.position.set(smoke.x[i], smoke.y[i] + age * 0.35, smoke.z[i]); this.dummy.rotation.set(i * 0.7, i * 2.399, 0);
+      this.dummy.scale.setScalar(0.09 + age * 0.5); this.dummy.updateMatrix();
+      this.smokePuffs.setMatrixAt(puffs, this.dummy.matrix); this.smokeTimes.setX(puffs++, smoke.at[i]);
+    }
+    this.smokePuffs.count = puffs;
+    if (puffs) { this.smokeTimes.clearUpdateRanges(); this.smokeTimes.addUpdateRange(0, puffs); this.smokeTimes.needsUpdate = true; this.upload(this.smokePuffs); }
+    this.activeEffects = beams + sparks + flashes + blasts + debris + rockets.count * 2 + puffs;
     this.twist.settings = sim.tuning; this.twist.update();
     this.controls.update();
     if (this.terrain && Math.abs(this.camera.position.x) <= this.worldHalfWidth && Math.abs(this.camera.position.z) <= this.worldHalfDepth) {

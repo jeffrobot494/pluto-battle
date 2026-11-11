@@ -53,11 +53,11 @@ try {
 
   // Exclusive toggles: pressing another switches, pressing the active one clears.
   const pressed = () => page.$$eval('[data-upgrade]', buttons => buttons.map(b => b.getAttribute('aria-pressed')).join(','));
-  await page.click('[data-upgrade="sniper"]'); assert.equal(await pressed(), 'true,false');
-  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,true');
-  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,false');
-  await page.keyboard.press('1'); assert.equal(await pressed(), 'true,false');
-  await page.keyboard.press('Escape'); assert.equal(await pressed(), 'false,false');
+  await page.click('[data-upgrade="sniper"]'); assert.equal(await pressed(), 'true,false,false');
+  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,true,false');
+  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,false,false');
+  await page.keyboard.press('1'); assert.equal(await pressed(), 'true,false,false');
+  await page.keyboard.press('Escape'); assert.equal(await pressed(), 'false,false,false');
 
   // A hold with nothing armed grows a neutral zone and does nothing on release.
   await page.mouse.move(f.center.x, f.center.y); await page.mouse.down(); await wait(700);
@@ -118,7 +118,7 @@ try {
   await page.waitForFunction(() => window.__battle.sim.totalExplosions === 1);
   assert.equal(await page.evaluate(() => window.__battle.selectedSoldier), 0);
   await page.click('#restart');
-  assert.equal(await pressed(), 'false,false');
+  assert.equal(await pressed(), 'false,false,false');
   await context.close();
 
   // ---------- Phone touch ----------

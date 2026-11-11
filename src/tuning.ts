@@ -15,6 +15,8 @@ export const DEFAULT_TUNING = {
   gravity: CONFIG.physics.gravity as number, explosionRadius: CONFIG.explosion.radius as number,
   explosionDamage: CONFIG.explosion.damage as number, explosionImpulse: CONFIG.explosion.impulse as number,
   twistThreshold: 12, twistCoast: 0.4,
+  rocketRange: CONFIG.rocket.range as number, rocketSpeed: CONFIG.rocket.speed as number,
+  rocketRadius: CONFIG.rocket.radius as number, rocketDamage: CONFIG.rocket.damage as number, rocketImpulse: CONFIG.rocket.impulse as number,
 };
 export type TuningKey = keyof typeof DEFAULT_TUNING;
 export type TuningValues = Record<TuningKey, number>;
@@ -38,6 +40,11 @@ export const TUNING: readonly TuningDefinition[] = [
   { key: 'fireInterval', label: 'Time between shots', group: 'Soldiers & weapons', min: 0.05, max: 3, step: 0.01, unit: 's', restart: false, help: 'Lower means faster fire. Preserves progress through the current cooldown.' },
   { key: 'speed', label: 'Movement speed', group: 'Soldiers & weapons', min: 0.2, max: 10, step: 0.1, unit: 'u/s', restart: false, help: 'Speed of advance and movement around neighbors.' },
   { key: 'radius', label: 'Collision radius', group: 'Soldiers & weapons', min: 0.1, max: 0.5, step: 0.01, unit: 'u', restart: true, help: 'Changes capsule size and solid footprint. Deployment spacing must accommodate it.' },
+  { key: 'rocketRange', label: 'Rocket range', group: 'Rocket launcher', min: 2, max: 40, step: 0.1, unit: 'u', restart: false, help: 'Distance at which a soldier fires his single rocket. He uses it at the first chance, before any other gun.' },
+  { key: 'rocketSpeed', label: 'Rocket speed', group: 'Rocket launcher', min: 2, max: 80, step: 0.5, unit: 'u/s', restart: false, help: 'Flight speed. Rockets fly straight at the lowest visible part of the target, so slow rockets land where he was standing.' },
+  { key: 'rocketRadius', label: 'Rocket blast radius', group: 'Rocket launcher', min: 0.5, max: 20, step: 0.1, unit: 'u', restart: false, help: 'Explosion radius on impact, measured in all three dimensions. Hits friends, foes and the shooter.' },
+  { key: 'rocketDamage', label: 'Rocket blast damage', group: 'Rocket launcher', min: 0, max: 1000, step: 1, unit: 'HP', restart: false, help: 'Damage once to every living soldier inside the blast, including allies.' },
+  { key: 'rocketImpulse', label: 'Rocket blast impulse', group: 'Rocket launcher', min: 0, max: 40, step: 0.1, unit: 'u/s', restart: false, help: 'Peak velocity change at the blast center, falling linearly to zero at the edge.' },
   { key: 'frontline', label: 'Frontline distance', group: 'Formation', min: 0.6, max: 30, step: 0.1, unit: 'u', restart: true, help: 'Each army starts this far from center; the initial gap is twice this.' },
   { key: 'columns', label: 'Formation columns', group: 'Formation', min: 1, max: 64, step: 1, unit: '', restart: true, help: 'More columns give a wider, shallower formation.' },
   { key: 'columnSpacing', label: 'Column spacing', group: 'Formation', min: 0.25, max: 4, step: 0.01, unit: 'u', restart: true, help: 'Distance between adjacent columns.' },
