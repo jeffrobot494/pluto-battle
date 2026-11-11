@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { BattleSimulation } from '../src/simulation.ts';
 import { DEFAULT_TUNING, TUNING, deploymentError } from '../src/tuning.ts';
 
-test('the 33 tuning controls validate legal formations and reject unsafe deployments', () => {
-  assert.equal(TUNING.length, 33); assert.equal(new Set(TUNING.map(d => d.key)).size, 33);
+test('the 35 tuning controls validate legal formations and reject unsafe deployments', () => {
+  assert.equal(TUNING.length, 35); assert.equal(new Set(TUNING.map(d => d.key)).size, 35);
   assert.equal(deploymentError(DEFAULT_TUNING), null);
   for (const values of [
     { ...DEFAULT_TUNING, radius: 0.5 }, { ...DEFAULT_TUNING, halfWidth: 6, columns: 20 },

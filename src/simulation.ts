@@ -9,6 +9,9 @@ import { ExplosionEvents, validExplosion, type Explosion } from './explosions.ts
 export { random } from './random.ts';
 export { rayCapsule } from './collision.ts';
 
+/** Cached line-of-sight refresh on a held target. Only guides movement; every shot casts its own ray. */
+const SIGHT_INTERVAL = 0.12;
+
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
 export type Command =
@@ -138,6 +141,12 @@ export class BattleSimulation {
   private readonly avoidanceX: Float64Array;
   private readonly avoidanceZ: Float64Array;
   private readonly nextRetarget: Float64Array;
+  /** Next cached line-of-sight refresh on the current target; independent of the (slower) search cadence. */
+  private readonly nextSight: Float64Array;
+  /** Until this time a soldier whose target just died holds position before picking another. */
+  private readonly reactUntil: Float64Array;
+  /** Until this time a soldier whose every move attempt failed waits instead of retrying. */
+  private readonly moveRetryAt: Float64Array;
   private readonly detourCos = new Float64Array(6);
   private readonly detourSin = new Float64Array(6);
   // Flanking: progress anchors detect soldiers pinned behind their own line;
@@ -203,6 +212,8 @@ export class BattleSimulation {
   readonly alive = new Uint16Array(2);
   readonly rng: () => number;
   private readonly steeringRng: () => number;
+  /** Jitter for decision timing (search cadence, reactions, retries); separate so it never shifts other streams. */
+  private readonly aiRng: () => number;
   readonly centerX = new Float64Array(2);
   readonly centerZ = new Float64Array(2);
   time = 0;
@@ -250,6 +261,7 @@ export class BattleSimulation {
     this.rebuildX = new Float64Array(capacity).fill(Infinity); this.rebuildZ = new Float64Array(capacity).fill(Infinity); this.lastProgress = new Float64Array(capacity);
     this.beamStamp = new Uint32Array(capacity);
     this.avoidanceX = new Float64Array(capacity); this.avoidanceZ = new Float64Array(capacity); this.nextRetarget = new Float64Array(capacity);
+    this.nextSight = new Float64Array(capacity); this.reactUntil = new Float64Array(capacity); this.moveRetryAt = new Float64Array(capacity);
     this.updateDetourAngles();
     this.x = new Float64Array(capacity); this.z = new Float64Array(capacity);
     this.velocityX = new Float64Array(capacity); this.velocityY = new Float64Array(capacity); this.velocityZ = new Float64Array(capacity);
@@ -273,6 +285,7 @@ export class BattleSimulation {
     // A separate stream preserves deployment/fire randomness. Handedness has no
     // relationship to unit IDs, team, column parity, or storage order.
     this.steeringRng = random(seed ^ 0x51ed270b);
+    this.aiRng = random(seed ^ 0x2c1b3c6d);
     if (!Number.isInteger(perTeam) || perTeam < 0 || perTeam * 2 > capacity || perTeam > 500) throw new Error('Supported deployment: 0–500 per team within capacity.');
     const columns = Math.max(1, Math.min(perTeam, this.tuning.columns));
     for (let team = 0; team < 2; team++) for (let n = 0; n < perTeam; n++) {
@@ -395,6 +408,7 @@ export class BattleSimulation {
     this.x[slot] = this.previousX[slot] = x; this.z[slot] = this.previousZ[slot] = z;
     this.y[slot] = this.previousY[slot] = this.terrain.heightAt(x, z); this.visible[slot] = 0; this.aimPitch[slot] = 0; this.lastProgress[slot] = this.time;
     this.avoidanceX[slot] = this.avoidanceZ[slot] = this.nextRetarget[slot] = 0;
+    this.nextSight[slot] = this.reactUntil[slot] = this.moveRetryAt[slot] = 0;
     this.anchorX[slot] = x; this.anchorZ[slot] = z; this.anchorTime[slot] = this.time;
     this.flankState[slot] = this.flankTries[slot] = this.engaged[slot] = 0; this.flankUntil[slot] = this.blockedUntil[slot] = 0;
     this.velocityX[slot] = this.velocityY[slot] = this.velocityZ[slot] = 0; this.grounded[slot] = 1;
@@ -855,18 +869,26 @@ export class BattleSimulation {
       const distance = target >= 0 ? Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) : Infinity;
       const valid = target >= 0 && this.hp[target] > 0 && this.team[target] !== this.team[i];
       const multipleWeapons = (this.inventory[i] & (this.inventory[i] - 1)) !== 0;
+      // A shooter whose target just fell takes a moment to notice and pick another, instead of snapping on the next tick.
+      if (!valid && this.target[i] !== 0 && this.engaged[i] && this.tuning.reactionDelay > 0) {
+        this.target[i] = 0;
+        this.reactUntil[i] = this.nextSearch[i] = this.time + this.tuning.reactionDelay * (0.5 + this.aiRng());
+      }
       if (!valid || ((distance > range || multipleWeapons || this.navigation && !this.visible[i] && this.time >= this.nextRetarget[i]) && this.time >= this.nextSearch[i])) {
         if (this.time >= this.nextSearch[i] || this.target[i] !== 0) {
           target = this.nearest(i, range + this.tuning.searchPadding);
           this.target[i] = target >= 0 ? this.id[target] : 0;
-          this.nextSearch[i] = this.time + this.tuning.searchInterval * (1 + (i % 5) * 0.05);
+          // Random ±25% spreads searches across ticks and keeps soldiers from deciding in lockstep.
+          this.nextSearch[i] = this.time + this.tuning.searchInterval * (0.75 + 0.5 * this.aiRng());
+          this.nextSight[i] = this.time + SIGHT_INTERVAL * (1 + (i % 5) * 0.05);
           this.visible[i] = +(target >= 0 && (!this.navigation || this.nearestVisible));
-          this.nextRetarget[i] = this.time + Math.max(0.4, this.tuning.searchInterval * 4);
+          this.nextRetarget[i] = this.time + Math.max(0.48, this.tuning.searchInterval * 1.5);
         } else target = -1;
-      } else if (this.navigation && this.time >= this.nextSearch[i]) {
+      } else if (this.navigation && this.time >= this.nextSight[i]) {
         this.visible[i] = +this.terrain.visible(this.x[i], this.y[i] + 0.7, this.z[i], this.x[target], this.y[target] + 0.7, this.z[target]);
-        this.nextSearch[i] = this.time + this.tuning.searchInterval * (1 + (i % 5) * 0.05);
+        this.nextSight[i] = this.time + SIGHT_INTERVAL * (1 + (i % 5) * 0.05);
       }
+      if (this.time < this.reactUntil[i]) { this.holdFlank(i, 1); continue; }
       const tx = target >= 0 ? this.x[target] : this.centerX[1 - this.team[i]];
       const tz = target >= 0 ? this.z[target] : this.centerZ[1 - this.team[i]];
       const dx = tx - this.x[i], dz = tz - this.z[i], d = Math.hypot(dx, dz);
@@ -886,6 +908,9 @@ export class BattleSimulation {
       if (d < 0.001 || !this.alive[1 - this.team[i]]) { this.holdFlank(i, 0); continue; }
       let step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && engage ? d - gunRange + 0.08 : d));
       if (step <= 0) { this.holdFlank(i, 0); continue; }
+      // Boxed in last attempt: wait it out. The anchor is left alone so stuck detection still sees the stall,
+      // and a soldier committed to a flank or sidestep keeps pushing, since that is how piles clear.
+      if (this.time < this.moveRetryAt[i] && !this.flankState[i]) { this.engaged[i] = 0; continue; }
       let vx = dx / d, vz = dz / d, separationX = 0, separationZ = 0;
       if (this.steerFlank(i)) { vx = this.flankDirX; vz = this.flankDirZ; step = Math.min(this.tuning.speed * CONFIG.step, this.flankDistance); }
       else if (this.navigation) {
@@ -921,6 +946,7 @@ export class BattleSimulation {
         }
       }
       if (moved) this.moving[i] = 1;
+      else if (this.tuning.moveRetryDelay > 0) this.moveRetryAt[i] = this.time + this.tuning.moveRetryDelay * (0.5 + this.aiRng());
     }
     if (this.weaponsEnabled) for (let i = 0; i < this.used; i++) {
       if (this.hp[i] <= 0) continue;
