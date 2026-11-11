@@ -93,8 +93,8 @@ test('nearby enemies interrupt a long-range engagement at the next target search
   assert.equal(sim.hp[sim.byId.get(close)!], 55);
 });
 
-test('shotgun-only soldiers advance while snipers hold at long range', () => {
-  for (const [inventory, advances] of [[bit(3), true], [bit(2), false], [all, false]]) {
+test('soldiers carrying a shotgun advance while snipers hold at long range', () => {
+  for (const [inventory, advances] of [[bit(3), true], [bit(2), false], [bit(0) | bit(2), false], [all, true]]) {
     const { sim, ai } = duel(15, inventory); sim.tuning.speed = 3; sim.nextFire.fill(100);
     sim.step(); assert.equal(sim.moving[ai] === 1, advances);
   }

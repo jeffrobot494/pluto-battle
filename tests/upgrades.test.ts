@@ -85,3 +85,24 @@ test('the zone grows ever faster and respects a cap', () => {
   assert.equal(zoneRadius(100, 30), 30);
   assert.ok(UPGRADES.every(u => u.cost === 0));
 });
+
+test('a rifleman with a shotgun fires the rifle while closing to shotgun range', () => {
+  const { sim, a, ai, bi } = duel(9);
+  sim.tuning.speed = 3;
+  sim.queue({ type: 'upgrade', ids: [a], weapon: WEAPON_ID.shotgun }); sim.flushCommands();
+  assert.ok(shotsBy(sim, 10) > 0, 'fires while advancing');
+  assert.equal(sim.weapon[ai], WEAPON_ID.rifle);
+  const start = Math.hypot(sim.x[bi] - sim.x[ai], sim.z[bi] - sim.z[ai]);
+  assert.ok(start < 9, 'advanced instead of holding at rifle range');
+  for (let n = 0; n < 600 && sim.hp[bi] > 0 && sim.weapon[ai] !== WEAPON_ID.shotgun; n++) sim.step();
+  assert.equal(sim.weapon[ai], WEAPON_ID.shotgun);
+});
+
+test('a soldier with a sniper rifle and laser rifle holds at sniper range', () => {
+  const { sim, a, ai, bi } = duel(20);
+  sim.queue({ type: 'upgrade', ids: [a], weapon: WEAPON_ID.sniper }); sim.flushCommands(); sim.step(); sim.tuning.speed = 3;
+  const x = sim.x[ai], z = sim.z[ai];
+  for (let n = 0; n < 30; n++) sim.step();
+  assert.ok(sim.hp[bi] > 0);
+  assert.ok(Math.hypot(sim.x[ai] - x, sim.z[ai] - z) < 0.01, 'holds instead of closing to rifle range');
+});

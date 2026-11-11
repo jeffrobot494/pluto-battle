@@ -143,8 +143,10 @@ export class BattleSimulation {
   private readonly flankZ: Float32Array;
   private readonly flankUntil: Float64Array;
   private readonly flankTries: Uint8Array;
-  /** 0 = normal pursuit, 1 = flanking around the line edge, 2 = backing off to find space. */
+  /** 0 = normal pursuit, 1 = flanking around the line edge, 2 = backing off to find space, 3 = sidestepping a friendly in the line of fire. */
   readonly flankState: Uint8Array;
+  /** Until this time a soldier whose shot was blocked by an ally does not count as engaged. */
+  readonly blockedUntil: Float64Array;
   private readonly engaged: Uint8Array;
   // Per-team line frame: forward axis toward the enemy, lateral extent and depth of the line.
   private readonly lineForwardX = new Float64Array(2);
@@ -206,6 +208,10 @@ export class BattleSimulation {
   totalDeaths = 0;
   result: Outcome = 'running';
   weaponsEnabled = true;
+  /** Allies stop shots; a blocked shooter holds fire and sidesteps for a clear lane. */
+  friendlyBlocking = true;
+  totalBlockedShots = 0;
+  totalSidesteps = 0;
   rejectedSpawns = 0;
   rejectedExplosions = 0;
   totalExplosions = 0;
@@ -254,6 +260,7 @@ export class BattleSimulation {
     this.anchorX = new Float32Array(capacity); this.anchorZ = new Float32Array(capacity); this.anchorTime = new Float64Array(capacity);
     this.flankX = new Float32Array(capacity); this.flankZ = new Float32Array(capacity); this.flankUntil = new Float64Array(capacity);
     this.flankTries = new Uint8Array(capacity); this.flankState = new Uint8Array(capacity); this.engaged = new Uint8Array(capacity);
+    this.blockedUntil = new Float64Array(capacity);
     this.grid = new SpatialGrid(capacity, this.tuning.halfWidth, this.tuning.halfDepth, this.team); this.rng = random(seed);
     // A separate stream preserves deployment/fire randomness. Handedness has no
     // relationship to unit IDs, team, column parity, or storage order.
@@ -304,6 +311,16 @@ export class BattleSimulation {
   longestRange(i: number) {
     let range = 0;
     for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) range = Math.max(range, this.weaponFor(w).range);
+    return range;
+  }
+
+  /** Range of the highest-DPS weapon carried (ties favor reach). Soldiers advance until this weapon can fire. */
+  preferredRange(i: number) {
+    let range = 0, score = -Infinity;
+    for (let w = 0; w < WEAPONS.length; w++) if (this.inventory[i] & (1 << w)) {
+      const gun = this.weaponFor(w), dps = gun.damage / gun.interval;
+      if (dps > score || (dps === score && gun.range > range)) { score = dps; range = gun.range; }
+    }
     return range;
   }
 
@@ -371,7 +388,7 @@ export class BattleSimulation {
     this.y[slot] = this.previousY[slot] = this.terrain.heightAt(x, z); this.visible[slot] = 0; this.aimPitch[slot] = 0; this.lastProgress[slot] = this.time;
     this.avoidanceX[slot] = this.avoidanceZ[slot] = this.nextRetarget[slot] = 0;
     this.anchorX[slot] = x; this.anchorZ[slot] = z; this.anchorTime[slot] = this.time;
-    this.flankState[slot] = this.flankTries[slot] = this.engaged[slot] = 0; this.flankUntil[slot] = 0;
+    this.flankState[slot] = this.flankTries[slot] = this.engaged[slot] = 0; this.flankUntil[slot] = this.blockedUntil[slot] = 0;
     this.velocityX[slot] = this.velocityY[slot] = this.velocityZ[slot] = 0; this.grounded[slot] = 1;
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
@@ -470,9 +487,11 @@ export class BattleSimulation {
         }
       }
     }
+    // Unarmed soldiers (empty inventory) have no gun range, so nothing counts as visible-in-range.
+    const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
     if (this.navigation) for (let n = 0; n < 4; n++) {
       const j = this.candidates[n];
-      if (j >= 0 && this.candidateDistances[n] <= this.weaponFor(this.weapon[i]).range ** 2
+      if (j >= 0 && this.candidateDistances[n] <= gunRange ** 2
         && this.terrain.visible(x, this.y[i] + 0.7, z, this.x[j], this.y[j] + 0.7, this.z[j])) { this.nearestVisible = true; return j; }
     }
     return this.nearestSlot;
@@ -503,6 +522,7 @@ export class BattleSimulation {
       return false;
     }
     let hit = -1, closest = distance;
+    const blocking = this.friendlyBlocking;
     if (++this.beamQuery === 0xffffffff) { this.beamStamp.fill(0); this.beamQuery = 1; }
     // Traverse just the cells crossed by the beam. Neighboring cells account for circle radius.
     let cx = this.grid.column(x), cz = this.grid.row(z);
@@ -515,9 +535,10 @@ export class BattleSimulation {
     while (t <= closest && cx >= 0 && cx < this.grid.columns && cz >= 0 && cz < this.grid.rows) {
       for (let row = Math.max(0, cz - 1); row <= Math.min(this.grid.rows - 1, cz + 1); row++) {
         for (let column = Math.max(0, cx - 1); column <= Math.min(this.grid.columns - 1, cx + 1); column++) {
-          if (!this.grid.teamCounts[1 - this.team[i]][row * this.grid.columns + column]) continue;
-          for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
-            if (this.team[j] === this.team[i]) continue;
+          const cellIndex = row * this.grid.columns + column;
+          if (!this.grid.teamCounts[1 - this.team[i]][cellIndex] && !(blocking && this.grid.teamCounts[this.team[i]][cellIndex])) continue;
+          for (let j = this.grid.heads[cellIndex]; j >= 0; j = this.grid.next[j]) {
+            if (j === i || (!blocking && this.team[j] === this.team[i])) continue;
             if (this.beamStamp[j] === this.beamQuery) continue;
             this.beamStamp[j] = this.beamQuery;
             const d = rayCapsule(x, y, z, dx, dy, dz, this.x[j], this.y[j], this.z[j], this.radius[j]);
@@ -527,6 +548,9 @@ export class BattleSimulation {
       }
       if (tX < tZ) { t = tX; tX += deltaX; cx += sx; } else { t = tZ; tZ += deltaZ; cz += sz; }
     }
+    if (hit >= 0 && this.team[hit] === this.team[i]) { this.blockShot(i, hit, dx, dz); return false; }
+    this.blockedUntil[i] = 0;
+    if (this.flankState[i] === 3) this.flankState[i] = 0;
     if (hit >= 0) this.pendingDamage[hit] += gun.damage;
     this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
@@ -535,6 +559,30 @@ export class BattleSimulation {
     const muzzle = Math.min(0.44, closest);
     this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * closest, z + dz * closest, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * closest, this.weapon[i]);
     return true;
+  }
+
+  /**
+   * Holds fire behind an ally and, budget permitting, commits to a short sidestep away from it, perpendicular
+   * to the shot. Deliberately no immediate retarget: the shot is retried on the normal fire interval.
+   */
+  private blockShot(i: number, ally: number, dx: number, dz: number) {
+    this.totalBlockedShots++;
+    this.blockedUntil[i] = this.time + 0.75;
+    if (!this.grounded[i] || this.flankState[i] === 3 || this.flankBudget <= 0) return;
+    // Step to the side of the ray the ally is not on; personal handedness breaks a dead-centre block.
+    const lx = -dz, lz = dx, offset = (this.x[ally] - this.x[i]) * lx + (this.z[ally] - this.z[i]) * lz;
+    const preferred = Math.abs(offset) < 0.05 ? this.detourSide[i] : offset > 0 ? -1 : 1;
+    const distance = this.radius[ally] + this.radius[i] + 0.2;
+    for (let n = 0; n < 2; n++) {
+      const side = n === 0 ? preferred : -preferred;
+      const wx = this.x[i] + lx * side * distance, wz = this.z[i] + lz * side * distance;
+      if (!this.flankReachable(i, wx, wz)) continue;
+      this.flankBudget--; this.totalSidesteps++;
+      this.flankX[i] = wx; this.flankZ[i] = wz; this.flankState[i] = 3;
+      this.flankUntil[i] = this.blockedUntil[i] = this.time + 0.75;
+      this.resetAnchor(i);
+      return;
+    }
   }
 
   /** O(n) per tick: each army's firing-line frame, from last tick's engaged soldiers (or the whole army before contact). */
@@ -596,7 +644,11 @@ export class BattleSimulation {
     if (!state) return false;
     const wx = this.flankX[i] - this.x[i], wz = this.flankZ[i] - this.z[i], wd = Math.hypot(wx, wz);
     // Arrival hands back to normal pursuit, now with open space beside the line.
-    if (wd < 0.5) { if (state === 2) this.flankTries[i] = 0; this.flankState[i] = 0; return false; }
+    if (wd < (state === 3 ? 0.08 : 0.5)) {
+      if (state === 2) this.flankTries[i] = 0;
+      if (state === 3) this.blockedUntil[i] = 0;
+      this.flankState[i] = 0; return false;
+    }
     this.flankDirX = wx / wd; this.flankDirZ = wz / wd; this.flankDistance = wd;
     return true;
   }
@@ -803,12 +855,17 @@ export class BattleSimulation {
       const dx = tx - this.x[i], dz = tz - this.z[i], d = Math.hypot(dx, dz);
       const reach = target >= 0 ? Math.hypot(d, this.y[target] - this.y[i]) : d;
       this.weapon[i] = this.selectWeapon(i, reach);
-      const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
+      // Fire whatever reaches (above), but keep closing until the best weapon carried can fire.
+      const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.preferredRange(i);
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
       // Airborne soldiers can still aim and fire, but cannot walk until they land.
       if (!this.grounded[i]) { this.holdFlank(i, 0); continue; }
-      const engage = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
+      const inRange = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
+      const blocked = this.time < this.blockedUntil[i];
+      const engage = inRange && !blocked;
       if (this.weaponsEnabled && engage) { this.holdFlank(i, 1); continue; }
+      // Blocked with no sidestep committed: hold still rather than shove into the crowd (cheap, and the lane often clears).
+      if (this.weaponsEnabled && inRange && this.flankState[i] !== 3) { this.holdFlank(i, 0); continue; }
       if (d < 0.001 || !this.alive[1 - this.team[i]]) { this.holdFlank(i, 0); continue; }
       let step = Math.min(this.tuning.speed * CONFIG.step, Math.max(0, this.weaponsEnabled && engage ? d - gunRange + 0.08 : d));
       if (step <= 0) { this.holdFlank(i, 0); continue; }

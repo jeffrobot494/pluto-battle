@@ -34,8 +34,8 @@ test('dense opposing crowds never penetrate through movement, grid crossings or 
   }
 });
 
-test('weapons respect range, friendly fire and first enemy intersection', () => {
-  const sim = new BattleSimulation(0);
+test('weapons respect range, friendly pass-through (blocking off) and first enemy intersection', () => {
+  const sim = new BattleSimulation(0); sim.friendlyBlocking = false;
   const shooter = sim.spawn(0, 0, 0)!, ally = sim.spawn(0, 0, 2)!, front = sim.spawn(1, 0, 5)!, rear = sim.spawn(1, 0, 7)!;
   const s = sim.byId.get(shooter)!, f = sim.byId.get(front)!, r = sim.byId.get(rear)!;
   sim.target[s] = rear;
@@ -46,6 +46,23 @@ test('weapons respect range, friendly fire and first enemy intersection', () => 
   assert.equal(sim.hp[r], CONFIG.soldier.health); assert.equal(sim.hp[sim.byId.get(ally)!], CONFIG.soldier.health);
   const far = new BattleSimulation(0); const a = far.spawn(0, 0, 15)!, b = far.spawn(1, 0, -15)!;
   far.target[far.byId.get(a)!] = b; far.nextFire.fill(0); far.step(); assert.equal(far.totalShots, 0);
+});
+
+test('an ally in the line of fire blocks the shot; the shooter sidesteps, then fires past it', () => {
+  const sim = new BattleSimulation(0);
+  const shooter = sim.spawn(0, 0, 0)!, ally = sim.spawn(0, 0, 2)!, enemy = sim.spawn(1, 0, 6)!;
+  const s = sim.byId.get(shooter)!, a = sim.byId.get(ally)!, e = sim.byId.get(enemy)!;
+  sim.target[s] = enemy; sim.nextFire[s] = 0; sim.nextFire[a] = sim.nextFire[e] = 1000;
+  sim.step();
+  assert.equal(sim.totalShots, 0); assert.equal(sim.totalBlockedShots, 1);
+  assert.equal(sim.hp[a], CONFIG.soldier.health); assert.equal(sim.hp[e], CONFIG.soldier.health);
+  assert.equal(sim.flankState[s], 3);
+  // Pin the ally and enemy so only the shooter's sidestep can open the lane.
+  for (let n = 0; n < 120 && sim.totalShots === 0; n++) { sim.x[a] = 0; sim.z[a] = 2; sim.step(); }
+  assert.ok(sim.totalShots > 0, 'shooter never found a clear lane');
+  assert.ok(Math.abs(sim.x[s]) > 0.3, `shooter did not step aside (x=${sim.x[s]})`);
+  assert.equal(sim.hp[a], CONFIG.soldier.health);
+  assert.ok(sim.hp[e] < CONFIG.soldier.health);
 });
 
 test('approaching rifles retain staggered firing phases at first contact', () => {
