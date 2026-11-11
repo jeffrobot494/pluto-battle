@@ -317,6 +317,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .mobile-hud #diagnostics { right: var(--hud-right); }
 .mobile-hud .tuning-control { grid-template-columns: 104px minmax(0, 1fr) 68px 18px; padding: 4px 0; }
 .mobile-hud .tuning-control input[type="range"] { height: 26px; }
+.tuning-control input[type="checkbox"] { grid-column: 2 / 4; justify-self: start; width: 20px; height: 20px; margin: 0; accent-color: #bce58d; cursor: pointer; }
 @media (min-height: 641px) {
   .mobile-hud .tuning-tab { padding: 7px 5px; }
 }

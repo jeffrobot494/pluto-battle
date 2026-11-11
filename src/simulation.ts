@@ -20,6 +20,20 @@ const ROCKET_FUSE = 1.5;
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
+export interface RetiredCorpse {
+  readonly id: number;
+  readonly at: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly velocityY: number;
+  readonly yaw: number;
+  readonly aimPitch: number;
+  readonly radius: number;
+  readonly team: Team;
+  readonly weapon: number;
+}
+
 export type Command =
   | { type: 'spawn'; team: Team; x: number; z: number; weapon?: number }
   | { type: 'equip'; ids: readonly number[]; weapon: number }
@@ -202,6 +216,10 @@ export class BattleSimulation {
   readonly lastHit: Float64Array;
   readonly lastFire: Float64Array;
   readonly diedAt: Float64Array;
+  private readonly corpseArchived: Uint8Array;
+  /** Ring of final physics poses. The renderer can consume several retirements between frames. */
+  readonly retiredCorpses: RetiredCorpse[] = [];
+  retiredCorpseCount = 0;
   readonly nextFire: Float64Array;
   readonly nextSearch: Float64Array;
   readonly moving: Uint8Array;
@@ -287,6 +305,7 @@ export class BattleSimulation {
     this.id = new Uint32Array(capacity); this.target = new Uint32Array(capacity);
     this.facing = new Float32Array(capacity); this.lastHit = new Float64Array(capacity).fill(-Infinity);
     this.lastFire = new Float64Array(capacity).fill(-Infinity); this.diedAt = new Float64Array(capacity).fill(-Infinity);
+    this.corpseArchived = new Uint8Array(capacity);
     this.nextFire = new Float64Array(capacity); this.nextSearch = new Float64Array(capacity);
     this.moving = new Uint8Array(capacity); this.pendingDamage = new Float32Array(capacity);
     this.detourSide = new Int8Array(capacity);
@@ -419,6 +438,7 @@ export class BattleSimulation {
     let slot = -1;
     for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && this.time - this.diedAt[i] > CONFIG.corpseLifetime) { slot = i; break; }
     if (slot < 0) { if (this.used >= this.capacity) return null; slot = this.used++; }
+    else this.archiveCorpse(slot);
     if (this.id[slot]) this.byId.delete(this.id[slot]);
     const id = this.nextId++;
     this.id[slot] = id; this.byId.set(id, slot);
@@ -436,6 +456,7 @@ export class BattleSimulation {
     this.upgrades[slot] = 0; this.upgradeWeapon[slot] = NO_WEAPON;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
+    this.corpseArchived[slot] = 0;
     this.nextFire[slot] = this.time + this.rng() * this.weaponFor(weapon).interval;
     this.nextSearch[slot] = this.time + this.rng() * this.tuning.initialSearchDelay;
     this.grid.insert(slot, x, z); this.alive[team]++;
@@ -912,11 +933,25 @@ export class BattleSimulation {
     }
   }
 
+  private archiveCorpse(i: number) {
+    if (this.corpseArchived[i] || !Number.isFinite(this.diedAt[i])) return;
+    this.corpseArchived[i] = 1;
+    this.retiredCorpses[this.retiredCorpseCount++ % CONFIG.retainedCorpses] = {
+      id: this.id[i], at: this.diedAt[i] + CONFIG.corpseLifetime,
+      x: this.x[i], y: this.y[i], z: this.z[i], velocityY: this.velocityY[i],
+      yaw: this.facing[i], aimPitch: this.aimPitch[i], radius: this.radius[i],
+      team: this.team[i] as Team, weapon: this.weapon[i],
+    };
+  }
+
   private integrateBodies() {
     this.activeBodies = this.airborne = 0;
     for (let n = 0; n < this.used; n++) {
       const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
-      if (this.hp[i] <= 0 && this.time - this.diedAt[i] >= CONFIG.corpseLifetime) continue;
+      if (this.hp[i] <= 0 && this.time - this.diedAt[i] >= CONFIG.corpseLifetime) {
+        this.archiveCorpse(i);
+        continue;
+      }
       const ground = this.terrain.heightAt(this.x[i], this.z[i]);
       if (this.y[i] <= ground + 1e-5 && this.velocityY[i] <= 0) { this.y[i] = ground; this.velocityY[i] = 0; this.grounded[i] = 1; }
       else { this.grounded[i] = 0; this.velocityY[i] -= this.tuning.gravity * CONFIG.step; }

@@ -13,6 +13,7 @@ export const DEFAULT_TUNING = {
   moveRetryDelay: 0.2, flankStuckTime: 0.5, flankTimeout: 4, flankSpacing: 0.9, congestionCost: 5,
   flashDuration: CONFIG.hit.duration as number, flashIntensity: CONFIG.hit.intensity as number,
   gravity: CONFIG.physics.gravity as number, explosionRadius: CONFIG.explosion.radius as number,
+  keepCorpses: 0,
   explosionDamage: CONFIG.explosion.damage as number, explosionImpulse: CONFIG.explosion.impulse as number,
   twistThreshold: 12, twistCoast: 0.4,
   rocketRange: CONFIG.rocket.range as number, rocketSpeed: CONFIG.rocket.speed as number,
@@ -22,11 +23,12 @@ export type TuningKey = keyof typeof DEFAULT_TUNING;
 export type TuningValues = Record<TuningKey, number>;
 export interface TuningDefinition {
   key: TuningKey; label: string; group: string; min: number; max: number; step: number;
-  unit: string; restart: boolean; help: string;
+  unit: string; restart: boolean; help: string; checkbox?: boolean;
 }
 
 export const TUNING: readonly TuningDefinition[] = [
   { key: 'gravity', label: 'Gravity strength', group: 'Physics & explosions', min: 0, max: 50, step: 0.1, unit: 'u/s²', restart: false, help: 'Downward acceleration. Applies immediately to airborne bodies; zero enables weightless testing.' },
+  { key: 'keepCorpses', label: 'Keep settled corpses', group: 'Physics & explosions', min: 0, max: 1, step: 1, unit: '', restart: false, checkbox: true, help: 'Keep fallen soldiers visible until the next battle. Toggle anytime to show or hide settled bodies.' },
   { key: 'explosionRadius', label: 'Explosion radius', group: 'Physics & explosions', min: 0.5, max: 20, step: 0.1, unit: 'u', restart: false, help: 'Radius of the next test explosion, measured in all three dimensions.' },
   { key: 'explosionDamage', label: 'Explosion damage', group: 'Physics & explosions', min: 0, max: 1000, step: 1, unit: 'HP', restart: false, help: 'Damage once to every living soldier inside the sphere, including allies. Zero tests motion only.' },
   { key: 'explosionImpulse', label: 'Explosion impulse', group: 'Physics & explosions', min: 0, max: 40, step: 0.1, unit: 'u/s', restart: false, help: 'Peak velocity change for unit-mass infantry. Falls linearly to zero at the sphere edge.' },

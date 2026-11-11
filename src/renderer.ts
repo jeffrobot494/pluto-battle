@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID, WEAPONS } from './config.ts';
+import { CONFIG, TEAM_COLORS, WEAPON_ID, WEAPONS } from './config.ts';
 import { BattleSimulation } from './simulation.ts';
 import { CameraTwist } from './camera-twist.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
@@ -8,6 +8,7 @@ import { Terrain } from './terrain.ts';
 import { addTerrainWorld, loadBedrockDetail, paletteOf } from './terrain-renderer.ts';
 import type { GroundPoint } from './battle-input.ts';
 import { UPGRADES } from './upgrades.ts';
+import { CorpseRenderer, setGunScale, type CorpseArmor } from './corpse-renderer.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
 const bodyColors = [new THREE.Color('#20242b'), new THREE.Color('#925b3b')];
@@ -50,6 +51,9 @@ export class BattleRenderer {
   private upgradeSeen = new Uint16Array(CONFIG.capacity);
   private pulseAt = new Float64Array(CONFIG.capacity).fill(-Infinity);
   private pulseSim: BattleSimulation | null = null;
+  private corpseRenderer: CorpseRenderer | null = null;
+  private corpseArmor?: CorpseArmor;
+  private readonly corpseRanks = new Map<number, number>();
   private readonly projected = new THREE.Vector3();
   activeExplosions = 0;
   readonly hitAttribute: THREE.InstancedBufferAttribute;
@@ -352,6 +356,10 @@ export class BattleRenderer {
   get resolutionScale() { return this.renderScale; }
 
   update(sim: BattleSimulation, alpha: number, visualTime: number) {
+    if (this.pulseSim !== sim || this.bodyRadius !== sim.tuning.radius) {
+      this.corpseRenderer?.dispose();
+      this.corpseRenderer = null;
+    }
     if (this.terrain !== sim.terrain) {
       this.world.traverse(object => { const mesh = object as THREE.InstancedMesh; if (mesh.isInstancedMesh) mesh.dispose(); mesh.geometry?.dispose(); if (mesh.material) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) m.dispose(); });
       this.world.clear(); this.worldHalfWidth = sim.grid.halfWidth; this.worldHalfDepth = sim.grid.halfDepth; this.terrain = sim.terrain; this.buildWorld(); this.resetCamera();
@@ -378,7 +386,7 @@ export class BattleRenderer {
       // Grounded soldiers follow the interpolated terrain; airborne bodies and corpses use simulated height.
       const groundY = sim.hp[i] > 0 && sim.grounded[i] ? surface : THREE.MathUtils.lerp(sim.previousY[i], sim.y[i], alpha);
       const yaw = sim.facing[i], fall = dead ? Math.min(1, age / 0.32) : 0;
-      const fade = dead ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
+      const fade = dead && !sim.tuning.keepCorpses ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
       const bob = !dead && sim.grounded[i] && sim.moving[i] ? Math.sin(sim.time * 17 + i * 3.7) * 0.025 : 0;
       this.dummy.position.set(x, groundY + CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
       this.dummy.rotation.set(fall * Math.PI / 2, yaw, 0, 'YXZ'); this.dummy.scale.setScalar(fade);
@@ -388,11 +396,7 @@ export class BattleRenderer {
       this.baseRotation.setFromEuler(this.dummy.rotation);
       const size = sim.radius[i] / CONFIG.soldier.radius;
       this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, groundY + 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
-      const weapon = sim.weapon[i];
-      if (weapon === NO_WEAPON) this.dummy.scale.setScalar(0);
-      else if (weapon === WEAPON_ID.sniper) this.dummy.scale.set(fade * 0.8, fade * 0.85, fade * 1.7);
-      else if (weapon === WEAPON_ID.shotgun) this.dummy.scale.set(fade * 1.8, fade * 1.25, fade * 0.7);
-      else if (weapon === WEAPON_ID.rocket) this.dummy.scale.set(fade * 1.6, fade * 1.4, fade * 1.25);
+      setGunScale(this.dummy.scale, sim.weapon[i], fade);
       this.dummy.rotation.set(-sim.aimPitch[i], yaw, fall * Math.PI / 2, 'YXZ'); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
       this.dummy.scale.setScalar(fade);
       this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], groundY + 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
@@ -424,7 +428,12 @@ export class BattleRenderer {
     for (const mesh of [this.bodies, this.guns, this.visors, this.shadows]) {
       mesh.count = count; this.upload(mesh);
     }
-    this.hitAttribute.clearUpdateRanges(); this.hitAttribute.addUpdateRange(0, count); this.hitAttribute.needsUpdate = true; this.visibleUnits = count;
+    this.hitAttribute.clearUpdateRanges(); this.hitAttribute.addUpdateRange(0, count); this.hitAttribute.needsUpdate = true;
+    if (!this.corpseRenderer && sim.tuning.keepCorpses && sim.retiredCorpses.length) {
+      this.corpseRenderer = new CorpseRenderer(this.scene, this, bodyColors, teamColors);
+    }
+    const retained = this.corpseRenderer?.update(sim, visualTime, this.corpseArmor, this.corpseRanks) ?? 0;
+    this.visibleUnits = count + retained;
     this.upgradePulses.count = pulses; if (pulses) this.upload(this.upgradePulses);
 
     let beams = 0, sparks = 0, flashes = 0;
@@ -506,6 +515,7 @@ export class BattleRenderer {
   }
 
   dispose() {
+    this.corpseRenderer?.dispose();
     this.resizeObserver.disconnect(); this.twist.dispose(); this.controls.dispose();
     this.bedrockDetail.texture.dispose();
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
