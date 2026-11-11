@@ -14,6 +14,7 @@ export const DEFAULT_TUNING = {
   flashDuration: CONFIG.hit.duration as number, flashIntensity: CONFIG.hit.intensity as number,
   gravity: CONFIG.physics.gravity as number, explosionRadius: CONFIG.explosion.radius as number,
   explosionDamage: CONFIG.explosion.damage as number, explosionImpulse: CONFIG.explosion.impulse as number,
+  twistThreshold: 12, twistCoast: 0.4,
 };
 export type TuningKey = keyof typeof DEFAULT_TUNING;
 export type TuningValues = Record<TuningKey, number>;
@@ -58,6 +59,8 @@ export const TUNING: readonly TuningDefinition[] = [
   { key: 'congestionCost', label: 'Congestion avoidance', group: 'Crowd steering', min: 0, max: 10, step: 0.1, unit: '', restart: false, help: 'Extra path cost through densely packed friendly cells, so soldiers spread onto alternate routes. Zero routes everyone down the single shortest path.' },
   { key: 'flashDuration', label: 'Damage-flash duration', group: 'Hit feedback', min: 0.02, max: 0.5, step: 0.01, unit: 's', restart: false, help: 'Duration of Pluto’s white hit flash.' },
   { key: 'flashIntensity', label: 'Damage-flash intensity', group: 'Hit feedback', min: 0.1, max: 3, step: 0.1, unit: '', restart: false, help: 'Brightness of the emissive hit flash.' },
+  { key: 'twistThreshold', label: 'Twist start angle', group: 'Camera', min: 0, max: 45, step: 1, unit: '°', restart: false, help: 'How far two fingers must twist before the camera starts turning. Higher keeps pinch-to-zoom from rotating the view by accident.' },
+  { key: 'twistCoast', label: 'Twist coasting', group: 'Camera', min: 0, max: 2, step: 0.05, unit: 's', restart: false, help: 'How long the camera keeps spinning after a twist is released mid-motion. Zero stops the moment fingers lift; touching the screen always stops it.' },
 ];
 
 export function validValue(key: TuningKey, value: number) {

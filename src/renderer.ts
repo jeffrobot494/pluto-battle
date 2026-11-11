@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID, WEAPONS } from './config.ts';
 import { BattleSimulation } from './simulation.ts';
+import { CameraTwist } from './camera-twist.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
 import { Terrain } from './terrain.ts';
 import { addTerrainWorld, paletteOf } from './terrain-renderer.ts';
@@ -21,6 +22,7 @@ export class BattleRenderer {
   readonly camera = new THREE.PerspectiveCamera(48, 1, 0.1, 350);
   readonly webgl: THREE.WebGLRenderer;
   readonly controls: OrbitControls;
+  readonly twist: CameraTwist;
   readonly dummy = new THREE.Object3D();
   private readonly world = new THREE.Group();
   readonly bodies: THREE.InstancedMesh;
@@ -168,6 +170,7 @@ export class BattleRenderer {
       this.camera.position.x += x - this.controls.target.x; this.camera.position.z += z - this.controls.target.z;
       this.controls.target.x = x; this.controls.target.z = z;
     });
+    this.twist = new CameraTwist(this.webgl.domElement, this.camera, this.controls);
     this.resizeObserver = new ResizeObserver(() => this.resize()); this.resizeObserver.observe(host); this.resize();
     this.resetCamera();
   }
@@ -210,7 +213,8 @@ export class BattleRenderer {
     return halfHeight / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
   }
   resetCamera() {
-    // Flush orbit/pan inertia before restoring the initial perspective view.
+    // Flush orbit/pan inertia and any coasting twist before restoring the initial perspective view.
+    this.twist.stop();
     const damping = this.controls.enableDamping; this.controls.enableDamping = false; this.controls.update();
     this.controls.target.set(0, (this.terrain?.maxHeight ?? 0) * 0.3, 0);
     this.camera.position.set(11, 58, 40).setLength(this.framingDistance(this.camera.aspect)); this.camera.zoom = 1;
@@ -441,6 +445,7 @@ export class BattleRenderer {
     if (blasts) { this.blastTimes.clearUpdateRanges(); this.blastTimes.addUpdateRange(0, blasts); this.blastTimes.needsUpdate = true; this.upload(this.blastSpheres); }
     if (debris) this.upload(this.blastSparks);
     this.activeEffects = beams + sparks + flashes + blasts + debris;
+    this.twist.settings = sim.tuning; this.twist.update();
     this.controls.update();
     if (this.terrain && Math.abs(this.camera.position.x) <= this.worldHalfWidth && Math.abs(this.camera.position.z) <= this.worldHalfDepth) {
       const minimum = this.terrain.heightAt(this.camera.position.x, this.camera.position.z) + 1.25;
@@ -450,7 +455,7 @@ export class BattleRenderer {
   }
 
   dispose() {
-    this.resizeObserver.disconnect(); this.controls.dispose();
+    this.resizeObserver.disconnect(); this.twist.dispose(); this.controls.dispose();
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
     this.scene.traverse(object => { const mesh = object as THREE.Mesh; if (mesh.geometry) geometries.add(mesh.geometry); if (mesh.material) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) materials.add(m); });
     geometries.forEach(g => g.dispose()); materials.forEach(m => m.dispose()); this.shadowTexture.dispose(); this.webgl.dispose();
