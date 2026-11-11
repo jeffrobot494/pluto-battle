@@ -10,9 +10,51 @@ export const DEFAULT_PALETTE: TerrainPalette = {
 };
 export const paletteOf = (terrain: Terrain | null) => terrain?.palette ?? DEFAULT_PALETTE;
 
+export function loadBedrockDetail() {
+  // Keep the palette visible while the texture loads or if the request fails.
+  const strength = { value: 0 };
+  const texture = new THREE.TextureLoader().load(
+    `${import.meta.env.BASE_URL}textures/alien-bedrock.webp`,
+    () => { strength.value = 2.5; },
+  );
+  texture.wrapS = texture.wrapT = THREE.MirroredRepeatWrapping;
+  return { texture, strength };
+}
+
+function bedrockMaterial(detail: ReturnType<typeof loadBedrockDetail>, parameters: THREE.MeshStandardMaterialParameters) {
+  const material = new THREE.MeshStandardMaterial(parameters);
+  material.onBeforeCompile = shader => {
+    shader.uniforms.bedrockMap = { value: detail.texture };
+    shader.uniforms.bedrockStrength = detail.strength;
+    shader.vertexShader = `varying vec3 vBedrockPosition;
+varying vec3 vBedrockNormal;
+${shader.vertexShader}`.replace('#include <begin_vertex>', `#include <begin_vertex>
+  vBedrockPosition = position / 9.0;
+  vBedrockNormal = normal;`);
+    shader.fragmentShader = `uniform sampler2D bedrockMap;
+uniform float bedrockStrength;
+varying vec3 vBedrockPosition;
+varying vec3 vBedrockNormal;
+${shader.fragmentShader}`.replace('#include <color_fragment>', `#include <color_fragment>
+  if (bedrockStrength > 0.0) {
+    // Blend across three axes so the detail keeps its scale on steep faces.
+    vec3 weights = abs(vBedrockNormal);
+    weights *= weights;
+    weights /= weights.x + weights.y + weights.z;
+    float grain = dot(weights, vec3(
+      texture2D(bedrockMap, vBedrockPosition.zy).r,
+      texture2D(bedrockMap, vBedrockPosition.xz).r,
+      texture2D(bedrockMap, vBedrockPosition.xy).r
+    ));
+    diffuseColor.rgb *= 1.0 + (grain - 0.53) * bedrockStrength;
+  }`);
+  };
+  return material;
+}
+
 /** Meshes are made from the exact support triangles and convex rock planes.
  * Children: 0 ground, 1 rocks, then edge walls, backdrop and skirt. */
-export function addTerrainWorld(world: THREE.Group, terrain: Terrain) {
+export function addTerrainWorld(world: THREE.Group, terrain: Terrain, detail: ReturnType<typeof loadBedrockDetail>) {
   const rng = random(terrain.seed ^ 0x41b693), vertices: number[] = [], colors: number[] = [], palette = paletteOf(terrain);
   const color = new THREE.Color(), low = new THREE.Color(palette.low), high = new THREE.Color(palette.high), cliff = new THREE.Color(palette.cliff), ramp = new THREE.Color(palette.ramp);
   const span = Math.max(1, terrain.maxHeight - terrain.minHeight), h = terrain.heights, stride = terrain.columns + 1;
@@ -41,7 +83,7 @@ export function addTerrainWorld(world: THREE.Group, terrain: Terrain) {
     }
   }
   const ground = new THREE.BufferGeometry(); ground.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3)); ground.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3)); ground.computeVertexNormals();
-  world.add(new THREE.Mesh(ground, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true })));
+  world.add(new THREE.Mesh(ground, bedrockMaterial(detail, { vertexColors: true, roughness: 1, flatShading: true })));
 
   const positions: number[] = [], rockColors: number[] = [];
   for (let i = 0; i < terrain.rocks.length; i++) {
@@ -54,7 +96,7 @@ export function addTerrainWorld(world: THREE.Group, terrain: Terrain) {
     }
   }
   const rocks = new THREE.BufferGeometry(); rocks.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); rocks.setAttribute('color', new THREE.Float32BufferAttribute(rockColors, 3)); rocks.computeVertexNormals();
-  world.add(new THREE.Mesh(rocks, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98, flatShading: true })));
+  world.add(new THREE.Mesh(rocks, bedrockMaterial(detail, { vertexColors: true, roughness: 0.98, flatShading: true })));
 
   // Edge walls: the battlefield reads as a raised block of ground, not a paper-thin sheet.
   const wall: number[] = [], bottom = terrain.minHeight - 1.5;
@@ -66,7 +108,7 @@ export function addTerrainWorld(world: THREE.Group, terrain: Terrain) {
   for (let c = 0; c < terrain.columns; c++) { edge(c + 1, 0, c, 0); edge(c, terrain.rows, c + 1, terrain.rows); }
   for (let r = 0; r < terrain.rows; r++) { edge(0, r, 0, r + 1); edge(terrain.columns, r + 1, terrain.columns, r); }
   const walls = new THREE.BufferGeometry(); walls.setAttribute('position', new THREE.Float32BufferAttribute(wall, 3)); walls.computeVertexNormals();
-  world.add(new THREE.Mesh(walls, new THREE.MeshStandardMaterial({ color: new THREE.Color(palette.cliff).multiplyScalar(0.75), roughness: 1, side: THREE.DoubleSide })));
+  world.add(new THREE.Mesh(walls, bedrockMaterial(detail, { color: new THREE.Color(palette.cliff).multiplyScalar(0.75), roughness: 1, side: THREE.DoubleSide })));
 
   // Distant scenery stays outside the active rectangle and never hides obstacles; it grows with the relief.
   const backdrop = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), new THREE.MeshStandardMaterial({ color: palette.backdrop, roughness: 1, flatShading: true }), 100);

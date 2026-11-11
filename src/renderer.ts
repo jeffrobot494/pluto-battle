@@ -5,7 +5,7 @@ import { BattleSimulation } from './simulation.ts';
 import { CameraTwist } from './camera-twist.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
 import { Terrain } from './terrain.ts';
-import { addTerrainWorld, paletteOf } from './terrain-renderer.ts';
+import { addTerrainWorld, loadBedrockDetail, paletteOf } from './terrain-renderer.ts';
 import type { GroundPoint } from './battle-input.ts';
 import { UPGRADES } from './upgrades.ts';
 
@@ -64,6 +64,7 @@ export class BattleRenderer {
   private baseRotation = new THREE.Quaternion();
   private axis = new THREE.Vector3(1, 0, 0);
   private shadowTexture: THREE.CanvasTexture;
+  private readonly bedrockDetail: ReturnType<typeof loadBedrockDetail>;
   private fxColor = new THREE.Color();
   private worldHalfWidth: number;
   private worldHalfDepth: number;
@@ -77,6 +78,7 @@ export class BattleRenderer {
     this.worldHalfWidth = initial.halfWidth; this.worldHalfDepth = initial.halfDepth; this.bodyRadius = initial.radius;
     this.scene.add(this.world);
     this.webgl = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', alpha: false });
+    this.bedrockDetail = loadBedrockDetail();
     this.webgl.outputColorSpace = THREE.SRGBColorSpace;
     this.webgl.toneMapping = THREE.ACESFilmicToneMapping;
     this.webgl.toneMappingExposure = 1.15;
@@ -223,7 +225,7 @@ export class BattleRenderer {
   private hemi!: THREE.HemisphereLight;
   private sun!: THREE.DirectionalLight;
   private buildWorld() {
-    addTerrainWorld(this.world, this.terrain ?? Terrain.flat(this.worldHalfWidth, this.worldHalfDepth));
+    addTerrainWorld(this.world, this.terrain ?? Terrain.flat(this.worldHalfWidth, this.worldHalfDepth), this.bedrockDetail);
     // Each map carries its own sky, fog and light colours.
     const palette = paletteOf(this.terrain), relief = Math.max(0, this.terrain?.maxHeight ?? 0);
     (this.scene.background as THREE.Color).set(palette.sky); this.webgl.setClearColor(palette.sky);
@@ -505,6 +507,7 @@ export class BattleRenderer {
 
   dispose() {
     this.resizeObserver.disconnect(); this.twist.dispose(); this.controls.dispose();
+    this.bedrockDetail.texture.dispose();
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
     this.scene.traverse(object => { const mesh = object as THREE.Mesh; if (mesh.geometry) geometries.add(mesh.geometry); if (mesh.material) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) materials.add(m); });
     geometries.forEach(g => g.dispose()); materials.forEach(m => m.dispose()); this.shadowTexture.dispose(); this.webgl.dispose();
