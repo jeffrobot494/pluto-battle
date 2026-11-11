@@ -87,7 +87,8 @@ try {
     const g = window.__battle, r = g.renderer;
     const slot = 0; const sim = g.sim;
     const ground = sim.y[slot]; // terrain height under the soldier
-    r.camera.position.set(sim.x[slot], ground + 12, sim.z[slot] + 12); r.controls.target.set(sim.x[slot], ground, sim.z[slot]); r.camera.zoom = 3;
+    // A steep view keeps the next soldier in the column from covering the sampled pixels on sloped maps.
+    r.camera.position.set(sim.x[slot], ground + 16.5, sim.z[slot] + 4.2); r.controls.target.set(sim.x[slot], ground, sim.z[slot]); r.camera.zoom = 3;
     r.camera.lookAt(r.controls.target); r.camera.updateProjectionMatrix(); r.controls.update();
     const p = r.project(sim.x[slot], ground + 0.55, sim.z[slot]);
     const gl = r.webgl.getContext(), width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
