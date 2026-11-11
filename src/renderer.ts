@@ -1,14 +1,19 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID } from './config.ts';
+import { CONFIG, NO_WEAPON, TEAM_COLORS, WEAPON_ID, WEAPONS } from './config.ts';
 import { BattleSimulation } from './simulation.ts';
 import { DEFAULT_TUNING, type TuningValues } from './tuning.ts';
 import { Terrain } from './terrain.ts';
 import { addTerrainWorld, paletteOf } from './terrain-renderer.ts';
-import type { GroundPoint } from './explosion-input.ts';
+import type { GroundPoint } from './battle-input.ts';
+import { UPGRADES } from './upgrades.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
 const bodyColors = [new THREE.Color('#20242b'), new THREE.Color('#925b3b')];
+const upgradeColors = WEAPONS.map((_, w) => new THREE.Color(UPGRADES.find(u => u.weapon === w)?.color ?? '#ffffff'));
+const PULSE_SECONDS = 0.7;
+// Ability zone mesh resolution: a polar grid draped over the terrain.
+const ZONE_RINGS = 40, ZONE_SEGMENTS = 128;
 
 /** Instanced capsule renderer. Hit feedback matches Pluto's emissive white pulse. */
 export class BattleRenderer {
@@ -30,6 +35,16 @@ export class BattleRenderer {
   readonly blastSparks: THREE.InstancedMesh;
   readonly blastTimes: THREE.InstancedBufferAttribute;
   readonly blastPreview: THREE.Mesh;
+  readonly selectionRing: THREE.Mesh;
+  readonly upgradePulses: THREE.InstancedMesh;
+  readonly zoneFill: THREE.Mesh;
+  readonly zoneEdge: THREE.Mesh;
+  /** Soldier ID highlighted by the selection ring; 0 for none. */
+  selectedId = 0;
+  private upgradeSeen = new Uint16Array(CONFIG.capacity);
+  private pulseAt = new Float64Array(CONFIG.capacity).fill(-Infinity);
+  private pulseSim: BattleSimulation | null = null;
+  private readonly projected = new THREE.Vector3();
   activeExplosions = 0;
   readonly hitAttribute: THREE.InstancedBufferAttribute;
   readonly uniforms = { time: { value: 0 }, duration: { value: Number(CONFIG.hit.duration) }, intensity: { value: Number(CONFIG.hit.intensity) } };
@@ -118,6 +133,27 @@ export class BattleRenderer {
     this.blastSpheres.renderOrder = 3;
     this.blastPreview = new THREE.Mesh(new THREE.RingGeometry(0.98, 1, 64), new THREE.MeshBasicMaterial({ color: '#ffd184', transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }));
     this.blastPreview.rotation.x = -Math.PI / 2; this.blastPreview.visible = false; this.scene.add(this.blastPreview);
+    this.selectionRing = new THREE.Mesh(new THREE.RingGeometry(0.46, 0.58, 40), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide, toneMapped: false }));
+    this.selectionRing.rotation.x = -Math.PI / 2; this.selectionRing.visible = false; this.selectionRing.renderOrder = 2; this.scene.add(this.selectionRing);
+    this.upgradePulses = this.instances(new THREE.RingGeometry(0.8, 1, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false }), CONFIG.capacity * 2);
+    this.upgradePulses.renderOrder = 3;
+    const fill = new THREE.BufferGeometry(), fillIndex: number[] = [];
+    fill.setAttribute('position', new THREE.BufferAttribute(new Float32Array((1 + ZONE_RINGS * ZONE_SEGMENTS) * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    const at = (ring: number, seg: number) => 1 + (ring - 1) * ZONE_SEGMENTS + seg;
+    for (let s = 0; s < ZONE_SEGMENTS; s++) {
+      const n = (s + 1) % ZONE_SEGMENTS;
+      fillIndex.push(0, at(1, n), at(1, s));
+      for (let r = 1; r < ZONE_RINGS; r++) fillIndex.push(at(r, s), at(r, n), at(r + 1, s), at(r, n), at(r + 1, n), at(r + 1, s));
+    }
+    fill.setIndex(fillIndex);
+    const zoneMaterial = (opacity: number) => new THREE.MeshBasicMaterial({ transparent: true, opacity, depthTest: false, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+    this.zoneFill = new THREE.Mesh(fill, zoneMaterial(0.13));
+    const edge = new THREE.BufferGeometry(), edgeIndex: number[] = [], edgePoints = ZONE_SEGMENTS * 2;
+    edge.setAttribute('position', new THREE.BufferAttribute(new Float32Array(edgePoints * 2 * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    for (let s = 0; s < edgePoints; s++) { const n = (s + 1) % edgePoints; edgeIndex.push(s * 2, n * 2, s * 2 + 1, n * 2, n * 2 + 1, s * 2 + 1); }
+    edge.setIndex(edgeIndex);
+    this.zoneEdge = new THREE.Mesh(edge, zoneMaterial(0.9));
+    for (const mesh of [this.zoneFill, this.zoneEdge]) { mesh.visible = false; mesh.frustumCulled = false; mesh.renderOrder = 5; this.scene.add(mesh); }
     this.buildWorld();
     this.controls = new OrbitControls(this.camera, this.webgl.domElement);
     this.controls.enableDamping = true; this.controls.dampingFactor = 0.12;
@@ -204,6 +240,56 @@ export class BattleRenderer {
     const { x, z } = this.groundPoint;
     return Math.abs(x) <= sim.grid.halfWidth && Math.abs(z) <= sim.grid.halfDepth ? { x, y: sim.terrain.heightAt(x, z), z } : null;
   }
+  /** Nearest living soldier whose body is within `tolerance` CSS pixels of a screen point, or -1. */
+  pickSoldier(clientX: number, clientY: number, sim: BattleSimulation, tolerance = 30) {
+    const rect = this.webgl.domElement.getBoundingClientRect();
+    let best = -1, bestDistance = tolerance;
+    this.camera.updateMatrixWorld();
+    for (let i = 0; i < sim.used; i++) {
+      if (sim.hp[i] <= 0) continue;
+      // Test both the chest and the feet so foreshortened capsules remain easy to hit.
+      for (const height of [CONFIG.soldier.height * 0.55, 0.15]) {
+        this.projected.set(sim.x[i], sim.y[i] + height, sim.z[i]).project(this.camera);
+        if (this.projected.z > 1) continue;
+        const d = Math.hypot(rect.left + (this.projected.x + 1) / 2 * rect.width - clientX, rect.top + (1 - this.projected.y) / 2 * rect.height - clientY);
+        if (d < bestDistance) { bestDistance = d; best = i; }
+      }
+    }
+    return best;
+  }
+  /** Screen position (CSS pixels relative to the canvas) above a soldier's head, or null when behind the camera. */
+  soldierScreen(sim: BattleSimulation, slot: number, height = CONFIG.soldier.height + 0.15) {
+    this.projected.set(sim.x[slot], sim.y[slot] + height, sim.z[slot]).project(this.camera);
+    if (this.projected.z > 1) return null;
+    return { x: (this.projected.x + 1) / 2 * this.width, y: (1 - this.projected.y) / 2 * this.height };
+  }
+  /** Draws the ability zone draped over the terrain; pass null to hide it. */
+  setZone(point: GroundPoint | null, radius = 0, color = '#ffffff', opacity = 1) {
+    const visible = !!point && radius > 0 && opacity > 0;
+    this.zoneFill.visible = this.zoneEdge.visible = visible;
+    if (!visible || !point) return;
+    const ground = this.terrain ?? Terrain.flat(this.worldHalfWidth, this.worldHalfDepth);
+    const height = (x: number, z: number) => ground.heightAt(x, z) + 0.12;
+    const fill = this.zoneFill.geometry.getAttribute('position') as THREE.BufferAttribute;
+    fill.setXYZ(0, point.x, height(point.x, point.z), point.z);
+    for (let r = 1; r <= ZONE_RINGS; r++) for (let s = 0; s < ZONE_SEGMENTS; s++) {
+      const angle = s / ZONE_SEGMENTS * Math.PI * 2, d = radius * r / ZONE_RINGS;
+      const x = point.x + Math.cos(angle) * d, z = point.z + Math.sin(angle) * d;
+      fill.setXYZ(1 + (r - 1) * ZONE_SEGMENTS + s, x, height(x, z), z);
+    }
+    fill.needsUpdate = true;
+    const edge = this.zoneEdge.geometry.getAttribute('position') as THREE.BufferAttribute, width = 0.14 + radius * 0.006, edgePoints = ZONE_SEGMENTS * 2;
+    for (let s = 0; s < edgePoints; s++) {
+      const angle = s / edgePoints * Math.PI * 2, c = Math.cos(angle), n = Math.sin(angle);
+      const inner = radius - width, outer = radius + width * 0.4;
+      edge.setXYZ(s * 2, point.x + c * inner, height(point.x + c * inner, point.z + n * inner), point.z + n * inner);
+      edge.setXYZ(s * 2 + 1, point.x + c * outer, height(point.x + c * outer, point.z + n * outer), point.z + n * outer);
+    }
+    edge.needsUpdate = true;
+    for (const mesh of [this.zoneFill, this.zoneEdge]) (mesh.material as THREE.MeshBasicMaterial).color.set(color);
+    (this.zoneFill.material as THREE.MeshBasicMaterial).opacity = 0.13 * opacity;
+    (this.zoneEdge.material as THREE.MeshBasicMaterial).opacity = 0.9 * opacity;
+  }
   setExplosionPreview(point: GroundPoint | null, radius: number) {
     this.blastPreview.visible = !!point;
     if (point) { this.blastPreview.position.set(point.x, point.y + 0.025, point.z); this.blastPreview.scale.setScalar(radius); }
@@ -247,8 +333,14 @@ export class BattleRenderer {
     }
     this.uniforms.time.value = visualTime;
     this.uniforms.duration.value = sim.tuning.flashDuration; this.uniforms.intensity.value = sim.tuning.flashIntensity;
-    let count = 0;
+    let count = 0, pulses = 0;
+    const now = performance.now() / 1000;
+    if (this.pulseSim !== sim) { this.pulseSim = sim; this.upgradeSeen.set(sim.upgrades.subarray(0, CONFIG.capacity)); this.pulseAt.fill(-Infinity); }
+    this.selectionRing.visible = false;
     for (let i = 0; i < sim.used; i++) {
+      const upgraded = sim.upgrades[i];
+      // Real time, not battle time, so feedback still plays when an upgrade lands while paused.
+      if (upgraded !== this.upgradeSeen[i]) { this.pulseAt[i] = upgraded > this.upgradeSeen[i] ? now : -Infinity; this.upgradeSeen[i] = upgraded; }
       const dead = sim.hp[i] <= 0, age = dead ? visualTime - sim.diedAt[i] : 0;
       if (dead && age >= CONFIG.corpseLifetime) continue;
       const x = THREE.MathUtils.lerp(sim.previousX[i], sim.x[i], alpha), z = THREE.MathUtils.lerp(sim.previousZ[i], sim.z[i], alpha);
@@ -281,12 +373,28 @@ export class BattleRenderer {
       const gz = (sim.terrain.heightAt(x, z + 0.12) - sim.terrain.heightAt(x, z - 0.12)) / 0.24;
       this.dummy.rotation.set(-Math.PI / 2 + Math.atan(gz), -Math.atan(gx), 0); this.dummy.scale.setScalar(fade * size / (1 + aboveGround * 0.35));
       this.dummy.updateMatrix(); this.shadows.setMatrixAt(count, this.dummy.matrix);
+      if (this.selectedId && sim.id[i] === this.selectedId) {
+        this.selectionRing.visible = true; this.selectionRing.position.set(x, surface + 0.04, z); this.selectionRing.scale.setScalar(size * fade);
+        (this.selectionRing.material as THREE.MeshBasicMaterial).color.copy(dead ? this.fxColor.set('#8b8190') : teamColors[sim.team[i]]);
+      }
+      const pulseAge = now - this.pulseAt[i];
+      if (!dead && pulseAge >= 0 && pulseAge < PULSE_SECONDS) {
+        // Two rings sweep up the body in the new weapon's colour.
+        for (let k = 0; k < 2; k++) {
+          const p = (pulseAge - k * 0.12) / (PULSE_SECONDS - 0.12); if (p < 0 || p > 1) continue;
+          this.dummy.position.set(x, groundY + 0.05 + p * CONFIG.soldier.height, z); this.dummy.rotation.set(0, 0, 0);
+          this.dummy.scale.setScalar(size * (0.75 - p * 0.35) * (k ? 0.8 : 1)); this.dummy.updateMatrix();
+          this.upgradePulses.setMatrixAt(pulses, this.dummy.matrix);
+          this.upgradePulses.setColorAt(pulses++, this.fxColor.copy(upgradeColors[sim.upgradeWeapon[i]] ?? teamColors[sim.team[i]]).multiplyScalar(1 - p * 0.6));
+        }
+      }
       count++;
     }
     for (const mesh of [this.bodies, this.guns, this.visors, this.shadows]) {
       mesh.count = count; this.upload(mesh);
     }
     this.hitAttribute.clearUpdateRanges(); this.hitAttribute.addUpdateRange(0, count); this.hitAttribute.needsUpdate = true; this.visibleUnits = count;
+    this.upgradePulses.count = pulses; if (pulses) this.upload(this.upgradePulses);
 
     let beams = 0, sparks = 0, flashes = 0;
     const events = sim.shots;

@@ -14,6 +14,10 @@ export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
 export type Command =
   | { type: 'spawn'; team: Team; x: number; z: number; weapon?: number }
   | { type: 'equip'; ids: readonly number[]; weapon: number }
+  /** Adds a weapon to each listed soldier's inventory; existing weapons are kept. */
+  | { type: 'upgrade'; ids: readonly number[]; weapon: number }
+  /** Adds a weapon to every living soldier of `team` within `radius` (ground distance) of x/z. */
+  | { type: 'upgradeArea'; team: Team; x: number; z: number; radius: number; weapon: number }
   | ({ type: 'explode' } & Explosion);
 
 /** First distance along a unit direction to a circle. */
@@ -164,6 +168,10 @@ export class BattleSimulation {
   readonly team: Uint8Array;
   readonly weapon: Uint8Array;
   readonly inventory: Uint32Array;
+  /** Incremented whenever a soldier receives an upgrade; renderers watch it for feedback. */
+  readonly upgrades: Uint16Array;
+  /** Most recent weapon given to each soldier by an upgrade. */
+  readonly upgradeWeapon: Uint8Array;
   readonly equipment: EquipmentSettings;
   readonly id: Uint32Array;
   readonly target: Uint32Array;
@@ -194,6 +202,7 @@ export class BattleSimulation {
   used = 0;
   nextId = 1;
   totalShots = 0;
+  totalUpgrades = 0;
   totalDeaths = 0;
   result: Outcome = 'running';
   weaponsEnabled = true;
@@ -235,6 +244,7 @@ export class BattleSimulation {
     this.hp = new Float32Array(capacity); this.radius = new Float32Array(capacity);
     this.team = new Uint8Array(capacity); this.weapon = new Uint8Array(capacity);
     this.inventory = new Uint32Array(capacity);
+    this.upgrades = new Uint16Array(capacity); this.upgradeWeapon = new Uint8Array(capacity).fill(NO_WEAPON);
     this.id = new Uint32Array(capacity); this.target = new Uint32Array(capacity);
     this.facing = new Float32Array(capacity); this.lastHit = new Float64Array(capacity).fill(-Infinity);
     this.lastFire = new Float64Array(capacity).fill(-Infinity); this.diedAt = new Float64Array(capacity).fill(-Infinity);
@@ -322,7 +332,29 @@ export class BattleSimulation {
   queue(command: Command) {
     if (this.commands.length >= 4096) throw new Error('Battle command queue is full.');
     // Own the ID list: callers cannot change a queued command after submission.
-    this.commands.push(command.type === 'equip' ? { ...command, ids: Array.from(command.ids) } : { ...command });
+    this.commands.push(command.type === 'equip' || command.type === 'upgrade' ? { ...command, ids: Array.from(command.ids) } : { ...command });
+  }
+  /** Applies queued commands now. Safe between steps, e.g. so upgrades show while paused. */
+  flushCommands() { this.applyCommands(); }
+
+  /** Living soldiers of `team` inside the zone who do not yet carry `weapon`. */
+  upgradeCandidates(team: Team, x: number, z: number, radius: number, weapon: number) {
+    let count = 0;
+    if (!WEAPONS[weapon]) return 0;
+    for (let i = 0; i < this.used; i++) if (this.inArea(i, team, x, z, radius) && !(this.inventory[i] & (1 << weapon))) count++;
+    return count;
+  }
+  private inArea(i: number, team: Team, x: number, z: number, radius: number) {
+    return this.hp[i] > 0 && this.team[i] === team && (this.x[i] - x) ** 2 + (this.z[i] - z) ** 2 <= radius * radius;
+  }
+  private upgradeSlot(i: number, weapon: number) {
+    if (this.hp[i] <= 0) return;
+    if (this.inventory[i] & (1 << weapon)) return;
+    this.inventory[i] |= 1 << weapon;
+    this.upgradeWeapon[i] = weapon; this.upgrades[i] = (this.upgrades[i] + 1) & 0xffff;
+    this.totalUpgrades++;
+    // Re-evaluate targets on the next tick so the new gun's reach is used immediately.
+    this.nextSearch[i] = Math.min(this.nextSearch[i], this.time);
   }
 
   spawn(team: Team, x: number, z: number, weapon = 0): number | null {
@@ -344,6 +376,7 @@ export class BattleSimulation {
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
     this.team[slot] = team; this.weapon[slot] = weapon; this.inventory[slot] = 1 << weapon; this.target[slot] = 0; this.moving[slot] = 0;
+    this.upgrades[slot] = 0; this.upgradeWeapon[slot] = NO_WEAPON;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
     this.nextFire[slot] = this.time + this.rng() * this.weaponFor(weapon).interval;
@@ -837,9 +870,18 @@ export class BattleSimulation {
     for (const command of this.commands) {
       if (command.type === 'spawn') { if (this.spawn(command.team, command.x, command.z, command.weapon) === null) this.rejectedSpawns++; }
       else if (command.type === 'explode') { if (this.result === 'running') this.explode(command); }
-      else if (WEAPONS[command.weapon]) for (const id of command.ids) {
+      else if (!WEAPONS[command.weapon]) continue;
+      else if (command.type === 'equip') for (const id of command.ids) {
         const i = this.byId.get(id);
         if (i !== undefined && this.hp[i] > 0) { this.inventory[i] = 1 << command.weapon; this.weapon[i] = command.weapon; }
+      }
+      else if (this.result !== 'running') continue;
+      else if (command.type === 'upgrade') for (const id of command.ids) {
+        const i = this.byId.get(id);
+        if (i !== undefined) this.upgradeSlot(i, command.weapon);
+      }
+      else if (Number.isFinite(command.x) && Number.isFinite(command.z) && command.radius >= 0) {
+        for (let i = 0; i < this.used; i++) if (this.inArea(i, command.team, command.x, command.z, command.radius)) this.upgradeSlot(i, command.weapon);
       }
     }
     this.commands.length = 0;

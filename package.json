@@ -21,6 +21,7 @@
     "test:terrain:campaign": "node --experimental-strip-types --no-warnings scripts/terrain-campaign.mjs",
     "test:cover:browser": "node scripts/cover-smoke.mjs",
     "test:explosions:browser": "node scripts/explosion-smoke.mjs",
+    "test:upgrades:browser": "node scripts/upgrade-smoke.mjs",
     "benchmark:explosions": "node scripts/explosion-benchmark.mjs",
     "benchmark:simulation": "node --experimental-strip-types --no-warnings scripts/simulation-benchmark.mjs"
   },

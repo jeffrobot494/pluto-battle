@@ -13,7 +13,10 @@ import { EquipmentPanel } from './equipment-panel.ts';
 import { prepareTerrain } from './navigation.ts';
 import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
-import { ExplosionInput, type GroundPoint } from './explosion-input.ts';
+import { BattleInput, type GroundPoint } from './battle-input.ts';
+import { UpgradeMenu } from './upgrade-menu.ts';
+import { SoldierCard } from './soldier-card.ts';
+import { NEUTRAL_ZONE_COLOR, PLAYER_TEAM, UPGRADES, zoneRadius, type Upgrade, type UpgradeId } from './upgrades.ts';
 
 const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
@@ -48,7 +51,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart" title="Restart on this map (R)">${icons.restart}<span>Restart</span></button><button id="new-map" title="New battle on a new map (N)">${icons.map}<span>New map</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
       <button id="diagnostics-toggle" class="performance-badge" aria-expanded="false" aria-controls="diagnostics" title="Performance and battle settings (D)">${icons.stats}<strong id="fps-label">—</strong><span>FPS</span></button>
     </footer>
-    <div class="input-hint">LEFT-DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> SPACE PAUSE <span>·</span> N NEW MAP</div>
+    <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1 / 2 UPGRADE</div>
     <details id="sound-panel" class="sound-panel">
       <summary>${icons.sound}<span>Sound effects</span><span id="sound-state">TAP TO ENABLE</span><span class="sound-chevron" aria-hidden="true">⌃</span></summary>
       <div class="sound-settings">
@@ -118,13 +121,84 @@ let prepared: ReturnType<typeof prepareTerrain> | null = null;
 prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
 let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
 let explosionTesting = false;
-const explosionInput = new ExplosionInput(renderer.webgl.domElement, () => !paused && !document.hidden && sim.result === 'running',
-  (x, y) => renderer.pickGround(x, y, sim), point => explode(point), point => renderer.setExplosionPreview(point, tuning.explosionRadius));
+const canDetonate = () => !paused && !document.hidden && sim.result === 'running';
+
+// Ability zone: grows from a held ground point; on release the armed action applies inside it.
+let zone: { point: GroundPoint; start: number; released: number; radius: number; color: string } | null = null;
+const ZONE_FADE_MS = 320;
+function zoneColor() { return upgradeMenu?.selected?.color ?? NEUTRAL_ZONE_COLOR; }
+function maxZoneRadius() { return Math.hypot(sim.grid.halfWidth, sim.grid.halfDepth) * 2; }
+function updateZone(now: number) {
+  if (!zone) return;
+  if (!zone.released) { zone.radius = zoneRadius((now - zone.start) / 1000, maxZoneRadius()); zone.color = zoneColor(); }
+  const fade = zone.released ? 1 - (now - zone.released) / ZONE_FADE_MS : 1;
+  if (fade <= 0) { zone = null; renderer.setZone(null); return; }
+  // The release flashes slightly wider so the moment of activation reads clearly.
+  renderer.setZone(zone.point, zone.radius * (zone.released ? 1 + (1 - fade) * 0.06 : 1), zone.color, fade);
+}
+
+/** Gives `upgrade` to friendly soldiers; returns how many gained a new weapon. */
+function upgradeArea(upgrade: Upgrade, point: { x: number; z: number }, radius: number) {
+  if (sim.result !== 'running') return 0;
+  const count = sim.upgradeCandidates(PLAYER_TEAM, point.x, point.z, radius, upgrade.weapon);
+  sim.queue({ type: 'upgradeArea', team: PLAYER_TEAM, x: point.x, z: point.z, radius, weapon: upgrade.weapon });
+  if (paused) { sim.flushCommands(); soldierCard.update(sim); }
+  return count;
+}
+function upgradeSoldier(upgrade: Upgrade, id: number) {
+  const i = sim.byId.get(id);
+  if (i === undefined || sim.result !== 'running' || sim.hp[i] <= 0 || sim.team[i] !== PLAYER_TEAM) return false;
+  const gained = !(sim.inventory[i] & (1 << upgrade.weapon));
+  sim.queue({ type: 'upgrade', ids: [id], weapon: upgrade.weapon });
+  if (paused) sim.flushCommands();
+  return gained;
+}
+function selectSoldier(id: number) {
+  renderer.selectedId = id; soldierCard.show(id); soldierCard.update(sim); soldierCard.position(sim, renderer);
+}
+function onTap(clientX: number, clientY: number) {
+  if (explosionTesting) {
+    if (canDetonate()) { const point = renderer.pickGround(clientX, clientY, sim); if (point) explode(point); }
+    return;
+  }
+  const slot = renderer.pickSoldier(clientX, clientY, sim);
+  if (slot < 0) { selectSoldier(0); return; }
+  const id = sim.id[slot], upgrade = upgradeMenu.selected;
+  if (upgrade && sim.team[slot] === PLAYER_TEAM) {
+    if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
+    else upgradeMenu.say(upgradeSoldier(upgrade, id) ? `Soldier #${id} → ${upgrade.name}` : `Soldier #${id} already carries a ${upgrade.name.toLowerCase()}`);
+  }
+  selectSoldier(id);
+}
+const input = new BattleInput(renderer.webgl.domElement, {
+  pick: (x, y) => renderer.pickGround(x, y, sim),
+  tap: onTap,
+  holdStart(point) { zone = { point, start: performance.now(), released: 0, radius: 0, color: zoneColor() }; updateZone(performance.now()); },
+  holdEnd(commit) {
+    if (!zone) return;
+    const now = performance.now(), upgrade = upgradeMenu.selected;
+    zone.radius = zoneRadius((now - zone.start) / 1000, maxZoneRadius()); zone.color = zoneColor();
+    if (commit && upgrade) {
+      if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
+      else { const count = upgradeArea(upgrade, zone.point, zone.radius); upgradeMenu.say(count ? `${count} soldier${count === 1 ? '' : 's'} → ${upgrade.name}` : `No Plutonians in range without a ${upgrade.name.toLowerCase()}`); }
+    }
+    // A canceled hold just disappears; a released one fades out.
+    if (commit) zone.released = now; else { zone = null; renderer.setZone(null); }
+  },
+  hover(x, y) { renderer.setExplosionPreview(explosionTesting && canDetonate() ? renderer.pickGround(x, y, sim) : null, tuning.explosionRadius); },
+  hoverEnd() { renderer.setExplosionPreview(null, tuning.explosionRadius); },
+  lockPan(locked) { renderer.controls.enablePan = !locked; },
+});
+const upgradeMenu = new UpgradeMenu($('#battle-app'), upgrade => {
+  renderer.webgl.domElement.classList.toggle('upgrade-cursor', !!upgrade);
+  if (zone && !zone.released) zone.color = zoneColor();
+});
+const soldierCard = new SoldierCard($('#battle-app'), () => selectSoldier(0));
 function explode(point: GroundPoint) {
   sim.queue({ type: 'explode', ...point, radius: tuning.explosionRadius, damage: tuning.explosionDamage, impulse: tuning.explosionImpulse });
 }
 function setExplosionTesting(value: boolean) {
-  explosionTesting = value; explosionInput.setEnabled(value);
+  explosionTesting = value; input.cancel(); renderer.setExplosionPreview(null, tuning.explosionRadius);
   $('#explosion-toggle').setAttribute('aria-pressed', String(value));
   $('#explosion-toggle small').textContent = value ? 'ON' : 'OFF';
   $('#explosion-status').hidden = !value;
@@ -153,7 +227,7 @@ function setPaused(value: boolean) {
   if (value) stopBenchmark('Benchmark stopped: battle paused.');
   paused = value; accumulator = 0;
   previousTime = 0;
-  explosionInput.cancel(); hzTime = hzTicks = simulationHz = 0;
+  input.cancel(); hzTime = hzTicks = simulationHz = 0;
   if (value) audio.stop();
   pauseButton.innerHTML = `${value ? icons.play : icons.pause}<span>${value ? 'Resume' : 'Pause'}</span>`;
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
@@ -172,6 +246,7 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
   setExplosionTesting(false);
+  input.reset(); zone = null; renderer.setZone(null); selectSoldier(0); upgradeMenu.select(null);
   audio.reset(sim);
   updateMapLabel();
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
@@ -221,6 +296,7 @@ function performanceSnapshot() {
 }
 
 function updateHud() {
+  soldierCard.update(sim);
   plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.battleTime);
   $('#explosion-status').textContent = sim.result !== 'running' ? 'Battle ended · restart to test explosions' : paused ? 'Paused · resume to test explosions' : 'Click or tap ground to detonate · drag to pan';
   if (paused || sim.result !== 'running') renderer.setExplosionPreview(null, tuning.explosionRadius);
@@ -306,7 +382,11 @@ tuningPanel.toggleButton.addEventListener('click', () => { if (!tuningPanel.elem
 equipmentPanel.toggleButton.addEventListener('click', () => { if (!equipmentPanel.element.hidden) { soundPanel.open = false; tuningPanel.toggle(false); toggleDiagnostics(false); } });
 $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
 document.addEventListener('keydown', event => {
-  if (event.target instanceof Element && event.target.closest('input, select, button, summary')) return;
+  const typing = event.target instanceof Element && event.target.closest('input, select, textarea');
+  const upgrade = typing || event.repeat ? undefined : UPGRADES.find(u => event.code === `Digit${u.key}` || event.code === `Numpad${u.key}`);
+  if (upgrade) { upgradeMenu.toggle(upgrade.id); return; }
+  if (event.code !== 'Escape' && event.target instanceof Element && event.target.closest('input, select, button, summary')) return;
+  if (event.code === 'Escape' && typing) return;
   if (event.code === 'Space') { event.preventDefault(); setPaused(!paused); }
   if (event.code === 'KeyR') restartMap();
   if (event.code === 'KeyN') newMap();
@@ -314,12 +394,12 @@ document.addEventListener('keydown', event => {
   if (event.code === 'KeyT') openTuning();
   if (event.code === 'KeyE') openEquipment();
   if (event.code === 'KeyC') renderer.resetCamera();
-  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); equipmentPanel.toggle(false); }
+  if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); equipmentPanel.toggle(false); upgradeMenu.select(null); selectSoldier(0); }
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopBenchmark('Benchmark stopped: page hidden.');
   hidden = document.hidden; previousTime = 0; accumulator = 0;
-  explosionInput.cancel(); hzTime = hzTicks = simulationHz = 0;
+  input.reset(); hzTime = hzTicks = simulationHz = 0;
   if (hidden) audio.stop();
 });
 
@@ -345,7 +425,9 @@ function frame(now: number) {
   const afterSim = performance.now();
   audio.update(sim, !paused);
   if (!paused) renderer.adapt(lastElapsed);
+  updateZone(now);
   renderer.update(sim, paused || !advancing ? 1 : accumulator / CONFIG.step, sim.time + endAge);
+  soldierCard.position(sim, renderer);
   lastSimMs = afterSim - start; lastRenderMs = performance.now() - afterSim;
   simMs = simMs * 0.9 + lastSimMs * 0.1; renderMs = renderMs * 0.9 + lastRenderMs * 0.1;
   if (capture.active) {
@@ -367,6 +449,14 @@ const api = {
   get benchmark() { return { active: capture.active, report: capture.report }; },
   get explosionTesting() { return explosionTesting; }, setExplosionTesting,
   explode,
+  get upgrade() { return upgradeMenu.selected?.id ?? null; },
+  selectUpgrade(id: UpgradeId | null) { upgradeMenu.select(id); },
+  upgradeArea(id: UpgradeId, x: number, z: number, radius: number) { const u = UPGRADES.find(u => u.id === id); return u ? upgradeArea(u, { x, z }, radius) : 0; },
+  get selectedSoldier() { return soldierCard.selectedId; },
+  selectSoldier,
+  get zone() { return zone && { ...zone.point, radius: zone.radius, released: !!zone.released, color: zone.color }; },
+  /** Screen coordinates of a soldier for gesture tests. */
+  soldierScreen(id: number) { const i = sim.byId.get(id); if (i === undefined) return null; renderer.update(sim, 1, sim.time); const rect = renderer.webgl.domElement.getBoundingClientRect(); const p = renderer.soldierScreen(sim, i, CONFIG.soldier.height * 0.55); return p && { x: rect.left + p.x, y: rect.top + p.y }; },
   get tuning() { return { ...tuning }; },
   get equipment() { return copyEquipment(equipment); },
   setEquipment(values: EquipmentSettings) {
@@ -383,6 +473,6 @@ const api = {
 };
 Object.assign(window, { __battle: api });
 updateHud(); frameHandle = requestAnimationFrame(frame);
-function dispose() { cancelAnimationFrame(frameHandle); audioEvents.abort(); explosionInput.dispose(); audio.dispose(); renderer.dispose(); }
+function dispose() { cancelAnimationFrame(frameHandle); audioEvents.abort(); input.dispose(); audio.dispose(); renderer.dispose(); }
 window.addEventListener('pagehide', dispose, { once: true });
 if (import.meta.hot) import.meta.hot.dispose(dispose);
