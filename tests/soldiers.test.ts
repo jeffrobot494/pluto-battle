@@ -45,8 +45,9 @@ test('drafts are distinct, random in order and top up a small pool', () => {
   assert.equal(small.draft(10).length, 10); assert.equal(small.size, 10);
 });
 
-test('survivors of a finished battle level up once; the fallen keep their level and stay in the pool', () => {
+test('survivors of a finished battle level up once; the fallen drop to level 0 and stay in the pool', () => {
   const roster = new Roster(random(5)); roster.reset();
+  for (const r of roster.list()) roster.update(r.id, { level: 5 });
   const sim = new BattleSimulation(20, 11);
   const battle = new BattleRoster(roster, sim);
   const plutonians = [...Array(sim.used).keys()].filter(i => sim.team[i] === 0);
@@ -58,13 +59,21 @@ test('survivors of a finished battle level up once; the fallen keep their level 
   for (const i of plutonians.slice(0, 10)) sim.hp[i] = 0;
   for (let i = 0; i < sim.used; i++) if (sim.team[i] === 1) sim.hp[i] = 0;
   assert.equal(battle.living().length, 10);
-  assert.equal(battle.recordOutcome(), false, 'nothing is recorded while the battle runs');
+  assert.equal(battle.recordOutcome(), false, 'no promotion while the battle runs');
+  // Death resets a soldier's level immediately, once.
+  assert.equal(battle.recordDeaths(), 10); assert.equal(battle.recordDeaths(), 0);
+  assert.ok(fallen.every(id => roster.get(id)?.level === 0));
+  assert.equal(battle.soldier(sim.id[plutonians[0]])!.level, 0, 'the battle record shows the reset');
   sim.result = 'plutonians';
   assert.ok(battle.recordOutcome()); assert.equal(battle.recordOutcome(), false);
-  const levels = roster.list().filter(r => r.level > 0);
-  assert.equal(levels.length, 10); assert.ok(levels.every(r => r.level === 1));
+  const survivors = battle.living().map(s => s.record.id);
+  assert.ok(survivors.every(id => roster.get(id)?.level === 6));
   assert.ok(fallen.every(id => roster.get(id)?.level === 0)); assert.equal(roster.size, ROSTER_SIZE);
-  assert.ok(battle.living().every(s => s.record.level === 1), 'battle records show the new level');
+  assert.equal(roster.list().filter(r => r.level === 5).length, ROSTER_SIZE - 20, 'undrafted soldiers are untouched');
+  assert.ok(battle.living().every(s => s.record.level === 6), 'battle records show the new level');
+  // Recruits attached to an already fallen body after a reset are not counted as deaths.
+  roster.reset(); roster.update(roster.list()[0].id, { level: 1 });
+  assert.equal(new BattleRoster(roster, sim).recordDeaths(), 0);
 });
 
 test('rosters save and load, and invalid saves fall back to a fresh pool', () => {

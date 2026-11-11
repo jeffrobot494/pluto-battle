@@ -105,6 +105,7 @@ export function saveRoster(roster: Roster) {
  */
 export class BattleRoster {
   private readonly bySimId = new Map<number, SoldierRecord>();
+  private readonly fallen = new Set<number>();
   private recorded: boolean;
   private readonly roster: Roster;
   readonly sim: BattleSimulation;
@@ -116,7 +117,11 @@ export class BattleRoster {
     let deployed = 0;
     for (let i = 0; i < sim.used; i++) if (sim.team[i] === team) deployed++;
     const drafted = roster.draft(deployed);
-    for (let i = 0, k = 0; i < sim.used; i++) if (sim.team[i] === team) this.bySimId.set(sim.id[i], drafted[k++]);
+    for (let i = 0, k = 0; i < sim.used; i++) if (sim.team[i] === team) {
+      this.bySimId.set(sim.id[i], drafted[k++]);
+      // Fresh recruits who take over an already fallen body (after a mid-battle reset) are not penalised.
+      if (sim.hp[i] <= 0) this.fallen.add(sim.id[i]);
+    }
   }
 
   /** The record of a soldier in this battle, by simulation id. */
@@ -130,10 +135,22 @@ export class BattleRoster {
     }
     return living;
   }
+  /** Soldiers who died lose every level. Returns how many newly fallen soldiers were reset. */
+  recordDeaths() {
+    let count = 0;
+    for (const [simId, record] of this.bySimId) {
+      if (this.fallen.has(simId)) continue;
+      const i = this.sim.byId.get(simId);
+      if (i !== undefined && this.sim.hp[i] > 0) continue;
+      this.fallen.add(simId); this.roster.update(record.id, { level: 0 }); record.level = 0; count++;
+    }
+    return count;
+  }
   /** Once the battle ends, promotes survivors exactly once. Returns true when it did. */
   recordOutcome() {
     if (this.recorded || this.sim.result === 'running') return false;
     this.recorded = true;
+    this.recordDeaths();
     const survivors = this.living();
     this.roster.promote(survivors.map(s => s.record.id));
     for (const s of survivors) s.record.level++;

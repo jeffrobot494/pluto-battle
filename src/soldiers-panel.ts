@@ -16,7 +16,7 @@ export class SoldiersTab implements TuningPage {
     this.content = document.createElement('div');
     this.content.className = 'roster-page';
     this.content.innerHTML = `
-      <p class="roster-intro tuning-page-note">Plutonians are drawn at random from a persistent pool each battle. Survivors gain a level when the battle ends.</p>
+      <p class="roster-intro tuning-page-note">Plutonians are drawn at random from a persistent pool each battle. Survivors gain a level when the battle ends; soldiers who die drop back to level 0.</p>
       <div class="roster-row" data-search-row="soldiers roster pool level reset view names">
         <p id="roster-summary"></p>
         <div class="roster-actions"><button type="button" id="roster-view">View</button><button type="button" id="roster-reset">Reset</button></div>

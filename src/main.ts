@@ -125,7 +125,11 @@ prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchet
 let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
 // Plutonians are drafted at random from the persistent soldier pool every battle.
 const roster = loadRoster(); saveRoster(roster);
-let battleRoster = new BattleRoster(roster, sim);
+let battleRoster = new BattleRoster(roster, sim), rosterDirty = false;
+function flushRoster() {
+  if (battleRoster.recordDeaths() || battleRoster.recordOutcome()) rosterDirty = true;
+  if (rosterDirty) { saveRoster(roster); rosterDirty = false; }
+}
 let explosionTesting = false;
 const canDetonate = () => !paused && !document.hidden && sim.result === 'running';
 
@@ -202,7 +206,7 @@ const upgradeMenu = new UpgradeMenu($('#battle-app'), upgrade => {
 const soldierCard = new SoldierCard($('#battle-app'), () => selectSoldier(0), id => battleRoster.soldier(id));
 const soldierList = new SoldierList($('#battle-app'), id => selectSoldier(id));
 function resetRoster() {
-  roster.reset(); saveRoster(roster);
+  roster.reset(); saveRoster(roster); rosterDirty = false;
   // Fresh recruits take the places of the soldiers already on the field.
   battleRoster = new BattleRoster(roster, sim);
   soldierCard.update(sim); soldierList.update(battleRoster);
@@ -257,8 +261,9 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   perTeam = tuning.count; seed = tuning.seed;
   terrainSeed = nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
   prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
+  flushRoster();
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
-  battleRoster = new BattleRoster(roster, sim);
+  battleRoster = new BattleRoster(roster, sim); soldiersTab?.refresh();
   setExplosionTesting(false);
   input.reset(); zone = null; renderer.setZone(null); selectSoldier(0); upgradeMenu.select(null);
   audio.reset(sim);
@@ -310,7 +315,10 @@ function performanceSnapshot() {
 }
 
 function updateHud() {
-  if (battleRoster.recordOutcome()) { saveRoster(roster); soldiersTab?.refresh(); }
+  // Deaths reset levels at once (in memory); the roster is saved when the battle ends or is left.
+  const died = battleRoster.recordDeaths() > 0, ended = battleRoster.recordOutcome();
+  if (died || ended) { rosterDirty = true; soldiersTab?.refresh(); }
+  if (sim.result !== 'running') flushRoster();
   soldierCard.update(sim); soldierList.update(battleRoster);
   plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.battleTime);
   $('#explosion-status').textContent = sim.result !== 'running' ? 'Battle ended · restart to test explosions' : paused ? 'Paused · resume to test explosions' : 'Click or tap ground to detonate · drag to pan';
@@ -413,7 +421,7 @@ document.addEventListener('keydown', event => {
   if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); upgradeMenu.select(null); selectSoldier(0); }
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopBenchmark('Benchmark stopped: page hidden.');
+  if (document.hidden) { stopBenchmark('Benchmark stopped: page hidden.'); flushRoster(); }
   hidden = document.hidden; previousTime = 0; accumulator = 0;
   input.reset(); hzTime = hzTicks = simulationHz = 0;
   if (hidden) audio.stop();
