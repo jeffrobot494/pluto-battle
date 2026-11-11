@@ -16,6 +16,8 @@ import { PerformanceCapture } from './performance-capture.ts';
 import { BattleInput, type GroundPoint } from './battle-input.ts';
 import { UpgradeMenu } from './upgrade-menu.ts';
 import { SoldierCard } from './soldier-card.ts';
+import { BattleRoster, loadRoster, saveRoster } from './soldiers.ts';
+import { SoldierList, SoldiersTab } from './soldiers-panel.ts';
 import { NEUTRAL_ZONE_COLOR, PLAYER_TEAM, UPGRADES, zoneRadius, type Upgrade, type UpgradeId } from './upgrades.ts';
 
 const icons = {
@@ -76,6 +78,7 @@ let tuning = loadTuning();
 let tuningPanel: TuningPanel;
 let equipment = loadEquipment();
 let equipmentTab: EquipmentTab;
+let soldiersTab: SoldiersTab | undefined;
 let renderer: BattleRenderer;
 try { renderer = new BattleRenderer($('#viewport'), tuning); }
 catch (error) { $('#error').hidden = false; $('#error').textContent = `The battlefield could not start. Enable WebGL and reload. ${error instanceof Error ? error.message : ''}`; throw error; }
@@ -120,6 +123,9 @@ let terrainSeed = parameters.has('terrain') ? Number(parameters.get('terrain')) 
 let prepared: ReturnType<typeof prepareTerrain> | null = null;
 prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
 let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment), paused = false, accumulator = 0, endAge = 0;
+// Plutonians are drafted at random from the persistent soldier pool every battle.
+const roster = loadRoster(); saveRoster(roster);
+let battleRoster = new BattleRoster(roster, sim);
 let explosionTesting = false;
 const canDetonate = () => !paused && !document.hidden && sim.result === 'running';
 
@@ -193,7 +199,14 @@ const upgradeMenu = new UpgradeMenu($('#battle-app'), upgrade => {
   renderer.webgl.domElement.classList.toggle('upgrade-cursor', !!upgrade);
   if (zone && !zone.released) zone.color = zoneColor();
 });
-const soldierCard = new SoldierCard($('#battle-app'), () => selectSoldier(0));
+const soldierCard = new SoldierCard($('#battle-app'), () => selectSoldier(0), id => battleRoster.soldier(id));
+const soldierList = new SoldierList($('#battle-app'), id => selectSoldier(id));
+function resetRoster() {
+  roster.reset(); saveRoster(roster);
+  // Fresh recruits take the places of the soldiers already on the field.
+  battleRoster = new BattleRoster(roster, sim);
+  soldierCard.update(sim); soldierList.update(battleRoster);
+}
 function explode(point: GroundPoint) {
   sim.queue({ type: 'explode', ...point, radius: tuning.explosionRadius, damage: tuning.explosionDamage, impulse: tuning.explosionImpulse });
 }
@@ -245,6 +258,7 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number) {
   terrainSeed = nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
   prepared = flatFixture ? null : prepareTerrain(tuning, terrainSeed, forcedArchetype);
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
+  battleRoster = new BattleRoster(roster, sim);
   setExplosionTesting(false);
   input.reset(); zone = null; renderer.setZone(null); selectSoldier(0); upgradeMenu.select(null);
   audio.reset(sim);
@@ -296,7 +310,8 @@ function performanceSnapshot() {
 }
 
 function updateHud() {
-  soldierCard.update(sim);
+  if (battleRoster.recordOutcome()) { saveRoster(roster); soldiersTab?.refresh(); }
+  soldierCard.update(sim); soldierList.update(battleRoster);
   plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.battleTime);
   $('#explosion-status').textContent = sim.result !== 'running' ? 'Battle ended · restart to test explosions' : paused ? 'Paused · resume to test explosions' : 'Click or tap ground to detonate · drag to pan';
   if (paused || sim.result !== 'running') renderer.setExplosionPreview(null, tuning.explosionRadius);
@@ -371,10 +386,11 @@ $('#apply-battle').addEventListener('click', () => {
 // In-mission settings live as tabs of the tuning panel (TUNING groups or TuningPage tabs), never as separate panels.
 equipmentTab = new EquipmentTab(equipment, tuning.count, values => { equipment = values; saveEquipment(equipment); });
 equipmentTab.updateRifle(sim.rifle);
+soldiersTab = new SoldiersTab(roster, resetRoster, () => soldierList.toggle(true, battleRoster));
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
   stopBenchmark('Benchmark stopped: tuning changed.');
   tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentTab.updateCount(tuning.count); equipmentTab.updateRifle(sim.rifle); updateHud();
-}, () => restartMap(), [equipmentTab]);
+}, () => restartMap(), [equipmentTab, soldiersTab]);
 function closeOtherPanels() { if (!tuningPanel.element.hidden) { soundPanel.open = false; toggleDiagnostics(false); } }
 function openTuning() { tuningPanel.toggle(); closeOtherPanels(); }
 function openEquipment() { if (tuningPanel.isPageOpen(equipmentTab.id)) tuningPanel.toggle(false); else tuningPanel.showPage(equipmentTab.id); closeOtherPanels(); }
@@ -393,6 +409,7 @@ document.addEventListener('keydown', event => {
   if (event.code === 'KeyT') openTuning();
   if (event.code === 'KeyE') openEquipment();
   if (event.code === 'KeyC') renderer.resetCamera();
+  if (event.code === 'Escape' && soldierList.open) { soldierList.toggle(false); return; }
   if (event.code === 'Escape') { toggleDiagnostics(false); soundPanel.open = false; tuningPanel.toggle(false); upgradeMenu.select(null); selectSoldier(0); }
 });
 document.addEventListener('visibilitychange', () => {
@@ -452,6 +469,8 @@ const api = {
   selectUpgrade(id: UpgradeId | null) { upgradeMenu.select(id); },
   upgradeArea(id: UpgradeId, x: number, z: number, radius: number) { const u = UPGRADES.find(u => u.id === id); return u ? upgradeArea(u, { x, z }, radius) : 0; },
   get selectedSoldier() { return soldierCard.selectedId; },
+  roster, get battleRoster() { return battleRoster; }, resetRoster,
+  openSoldierList(open = true) { soldierList.toggle(open, battleRoster); },
   selectSoldier,
   get zone() { return zone && { ...zone.point, radius: zone.radius, released: !!zone.released, color: zone.color }; },
   /** Screen coordinates of a soldier for gesture tests. */

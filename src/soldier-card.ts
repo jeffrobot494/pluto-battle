@@ -1,6 +1,7 @@
 import { WEAPONS } from './config.ts';
 import type { BattleSimulation } from './simulation.ts';
 import type { BattleRenderer } from './renderer.ts';
+import type { SoldierRecord } from './soldiers.ts';
 
 const TEAM_NAMES = ['Plutonian', 'Sectoid'];
 
@@ -10,7 +11,8 @@ export class SoldierCard {
   private id = 0;
   private lastContent = '';
 
-  constructor(host: HTMLElement, private readonly onClose: () => void) {
+  /** `record` looks up a soldier's roster entry by simulation id; anonymous soldiers show their number. */
+  constructor(host: HTMLElement, private readonly onClose: () => void, private readonly record: (id: number) => SoldierRecord | undefined = () => undefined) {
     host.insertAdjacentHTML('beforeend', `<section id="soldier-card" class="soldier-card" hidden aria-live="polite" aria-label="Selected soldier">
       <div class="soldier-card-body"></div><button class="soldier-card-close" aria-label="Deselect soldier">×</button></section>`);
     this.element = host.querySelector('#soldier-card')!;
@@ -27,7 +29,8 @@ export class SoldierCard {
     if (i === undefined) { this.onClose(); return; }
     const alive = sim.hp[i] > 0, hp = Math.max(0, Math.ceil(sim.hp[i])), max = sim.tuning.health;
     const guns = WEAPONS.map((_, w) => w).filter(w => sim.inventory[i] & (1 << w));
-    const content = `<div class="soldier-card-head"><span class="soldier-team team-${sim.team[i]}">${TEAM_NAMES[sim.team[i]]}</span><b>#${this.id}</b></div>
+    const record = this.record(this.id);
+    const content = `<div class="soldier-card-head"><span class="soldier-team team-${sim.team[i]}">${TEAM_NAMES[sim.team[i]]}</span>${record ? `<b>${record.name} <small class="soldier-level">LV ${record.level}</small></b>` : `<b>#${this.id}</b>`}</div>
       ${alive ? `<div class="soldier-hp"><div class="soldier-hp-bar"><i style="width: ${Math.min(100, hp / max * 100)}%"></i></div><span>${hp} / ${max} HP</span></div>` : '<div class="soldier-kia">KILLED IN ACTION</div>'}
       <ul class="soldier-guns">${guns.length ? guns.map(w => `<li class="${alive && sim.weapon[i] === w ? 'active' : ''}"><span>${sim.weaponFor(w).name}</span><small>${sim.weaponFor(w).range} RNG</small></li>`).join('') : '<li class="unarmed">Unarmed</li>'}</ul>`;
     this.element.classList.toggle('dead', !alive);

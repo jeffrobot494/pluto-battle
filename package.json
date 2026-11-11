@@ -15,6 +15,7 @@
     "test:balance": "node --experimental-strip-types --no-warnings scripts/balance-check.mjs",
     "test:tuning": "node scripts/tuning-smoke.mjs",
     "test:equipment": "node scripts/equipment-smoke.mjs",
+    "test:roster": "node scripts/roster-smoke.mjs",
     "test:terrain:browser": "node scripts/terrain-smoke.mjs",
     "test:browser:all": "node scripts/browser-regressions.mjs",
     "benchmark:terrain": "node scripts/terrain-benchmark.mjs",

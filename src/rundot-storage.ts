@@ -2,7 +2,7 @@ import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { installSettingsStore } from './settings-store.ts';
 
 /** Keys of the player settings persisted in RUN app storage. */
-export const SETTINGS_KEYS = ['pluto-battle-tuning-v1', 'pluto-battle-equipment-v1', 'pluto-battle.sound-volumes.v1'] as const;
+export const SETTINGS_KEYS = ['pluto-battle-tuning-v1', 'pluto-battle-equipment-v1', 'pluto-battle.sound-volumes.v1', 'pluto-battle-soldiers-v1'] as const;
 
 async function loadAll() {
   const entries = await Promise.all(SETTINGS_KEYS.map(async key => [key, await RundotGameAPI.appStorage.getItem(key)] as const));
