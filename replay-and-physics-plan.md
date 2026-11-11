@@ -45,17 +45,33 @@
 - **Chunked saving:** flush in chunks, and flush on `onPause` and on hide. Players who give up
   often close the app partway through a battle; this is the case we care about most.
 
-### 3. Getting replays to the developer (needs a spike)
-- The SDK's Files API can only list the current player's own files (`FILES.md:347`).
-- Candidate approach:
-  - Upload each replay with `files.upload`, using a key such as `replays/<session>/<n>`.
-  - Log an analytics event that holds the key and URL.
-  - **Unverified:** whether the developer can then download it. Private URLs expire after 4 hours.
-- Alternatives:
-  - Analytics events that carry the compressed command chunks directly, since command logs are
-    small. Check the payload size limits.
-  - A small backend of our own.
-- **Privacy:** check what the RUN.world terms require for recording player sessions.
+### 3. Getting replays to the developer
+- **Save on the device:** write the compressed chunks to the player's `appStorage`.
+  - Each player gets 10 MiB and 128 items. Each value is 256 KiB comfortable, 1 MB at most
+    (`STORAGE.md:100-119`).
+  - Use one key per battle (`replay:<n>`), rewritten every ~10 s of play and on
+    `visibilitychange` → hidden.
+  - Keep the last N battles as a ring.
+  - A write still in flight when the app is killed can be lost, so we lose at most the last
+    ~10 s.
+  - Switch to the Files API (private, up to 50 MB, paid from creator storage) only if replays
+    outgrow this.
+- **Index:** send an analytics event `replay_saved {key, battle, ticks, outcome}`. The pipeline
+  stamps it with `profile_id`.
+- **Where players quit:** send the `session_end {screen, trigger, duration_seconds}` event.
+  RUN's `session_end_summary_30d` export reports from it (`ANALYTICS.md:95`).
+- **Developer side:** the creator CLI can read any player's data:
+  - `rundot storage data <profile-id> --format json`
+  - `rundot files get <profile-id> <key>`
+  - (`cli-reference.md:463-505`)
+  - A `scripts/fetch-replays.mjs` script pulls replays into a gitignored `replays/` folder for
+    the viewer.
+- **To verify first:** whether `rundot analytics export` shows per-event rows with `profile_id`.
+  It may only give aggregates. That is how we find out which players to pull.
+  - If it only gives aggregates, keep a player index another way. For example, maintain a
+    "players with replays" list.
+- **Privacy:** check what RUN.world's terms say about recording player sessions, and disclose it.
+  Snapshots contain player personal data (PII), so keep `replays/` out of git.
 
 ### 4. Viewer
 - A dev-only route (`?replay=<url>`) that loads a replay.
