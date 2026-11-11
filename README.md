@@ -27,6 +27,7 @@ npm run test:terrain:browser # seeded terrain, 20 resets, 1,000 units, touch, ca
 npm run test:browser:all     # isolated flat-scene combat/camera/audio/tuning regressions
 npm run benchmark:terrain   # sustained 500 vs 500 (server on 5181)
 npm run test:explosions:browser # desktop/touch explosions and airborne rendering
+npm run test:upgrades:browser # tap select, hold zone and upgrades on desktop and touch
 npm run benchmark:simulation # 200/500/1,000 soldiers, with and without repeated blasts
 npm run benchmark:explosions # sustained 1,000-soldier GPU capture with burst explosions
 ```
@@ -41,6 +42,9 @@ The battle starts automatically on a newly generated map. Every map is one of el
 - **Restart / R:** replay the battle on the same map.
 - **New map / N / Play again:** a new battle on a fresh map, always of a different landscape type than the current one.
 - **Left-drag / one-finger drag:** pan. **Hold right-click and drag:** orbit the perspective camera.
+- **Tap / click a soldier:** select him. A ring marks him and a card above him shows his health and every gun he carries (the one in use is highlighted). Works for both armies; tap empty ground, × or Escape to deselect.
+- **Tap and hold (ground):** a circle grows from the held point, faster the longer you hold, with no size limit. Release to apply the armed action inside it. With nothing armed the circle is neutral white and does nothing. Moving more than a few pixels before the circle appears pans instead; a second finger cancels it.
+- **Upgrade rail (right edge) / 1 / 2:** arm **Sniper rifle** (range 24) or **Shotgun** (range 4); the toggles are exclusive and pressing the armed one disarms it. While armed, the circle takes the upgrade's color; releasing it adds the gun to every living Plutonian inside, and tapping a single Plutonian upgrades just him. Upgrades add to the soldier's inventory and he switches automatically to the best gun for the current range. Sectoids can be inspected but not upgraded. Upgrades are free for now, work while paused, and the toggle clears on restart.
 - **Wheel / pinch / + / −:** zoom toward or away from the battlefield.
 - **Center view / C:** reset the camera.
 - **FPS badge / D:** diagnostics, adaptive quality controls, deployment presets through 500 vs 500, and the on-device performance capture.
@@ -85,7 +89,8 @@ Explosions use the full 3D distance from their center to each soldier capsule's 
 - `src/equipment.ts`, `src/equipment-panel.ts`: the item catalog, independent per-army percentages, validated browser persistence and collapsible deployment controls. Weapon definitions stay separate from army allocations. Inventories use compact masks alongside the active weapon array; the developer-only heavy laser remains available through the existing API.
 - `src/tuning.ts`, `src/tuning-panel.ts`: the 29-control schema, deployment validation, browser persistence, live/restart behavior and collapsible tuning UI. Each simulation owns its settings and rifle definition, so tuning one simulation does not mutate another.
 - `src/collision.ts`, `src/explosions.ts`: upright capsule ray tests, validated reusable explosion definitions, and a bounded presentation buffer. Infantry currently has unit mass. Scenery is static and blasts do not use occlusion.
-- `src/explosion-input.ts`: pointer tap recognition shared with camera controls; ignores drags, multitouch, canceled gestures, and paused interactions.
+- `src/battle-input.ts`: tap and tap-and-hold recognition shared with camera controls; drags pan, multitouch and canceled gestures abort, and an active hold locks panning.
+- `src/upgrades.ts`, `src/upgrade-menu.ts`, `src/soldier-card.ts`: the upgrade catalog and zone growth curve, the right-edge upgrade rail, and the selected-soldier card.
 - `src/audio.ts`: five original synthesized Web Audio effects, reusable PCM buffers, independent persisted mixer channels, stereo spread and compressed output. Combat notifications are bounded, rate-limited and capped at 24 simultaneous voices; pause, hidden tabs and restarts clear active sounds. Cosmetic event limits never affect combat damage.
 - `src/main.ts`: responsive HUD, camera and battle controls, bounded fixed-step scheduling, visibility pausing, performance sampling and developer API.
 

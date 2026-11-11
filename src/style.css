@@ -177,3 +177,52 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 @media (max-width: 900px) { .explosion-toggle { left: 284px; }.explosion-status { left: 284px; max-width: calc(100% - 306px); } }
 @media (max-width: 600px) { .explosion-toggle { top: 219px; left: 19px; height: 31px; }.explosion-status { top: 252px; left: 19px; max-width: calc(100% - 38px); font-size: 9px; } }
 @media (max-height: 560px) and (min-width: 601px) { .explosion-toggle { top: 120px; }.explosion-status { top: 156px; } }
+
+/* Tap-and-hold gestures: no text selection or iOS callouts on long press. */
+#viewport canvas { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+#viewport canvas.upgrade-cursor { cursor: crosshair; }
+
+/* Upgrade rail: mutually exclusive weapon toggles on the right edge. */
+.upgrade-menu { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 6px 6px; width: 80px; background: #221b27b8; border: 1px solid #ffffff26; border-radius: 6px; backdrop-filter: blur(10px); z-index: 2; }
+.upgrade-title { font: 7px Consolas, monospace; letter-spacing: 0.16em; color: #b8a8bf; text-align: center; }
+.upgrade-button { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 4px 7px; background: #2d2436; border: 1px solid #ffffff22; border-radius: 4px; color: #ddd2e2; font-size: 10px; transition: border-color 0.12s, background 0.12s, box-shadow 0.12s; }
+.upgrade-button svg { width: 22px; height: 22px; color: var(--upgrade); }
+.upgrade-button small { font: 7px Consolas, monospace; color: #a593ad; letter-spacing: 0.06em; }
+.upgrade-button kbd { position: absolute; top: 3px; right: 4px; font: 7px Consolas, monospace; color: #8f7f98; }
+.upgrade-button:hover { border-color: color-mix(in srgb, var(--upgrade) 55%, transparent); }
+.upgrade-button[aria-pressed="true"] { border-color: var(--upgrade); background: color-mix(in srgb, var(--upgrade) 22%, #2d2436); color: #fff; box-shadow: 0 0 0 1px var(--upgrade), 0 0 18px color-mix(in srgb, var(--upgrade) 45%, transparent); }
+.upgrade-button[aria-pressed="true"] small { color: #f2eaf5; }
+.upgrade-status { position: absolute; right: 126px; top: 50%; transform: translateY(-50%); margin: 0; max-width: min(260px, calc(100% - 160px)); padding: 7px 10px; text-align: right; font-size: 10px; line-height: 1.4; color: #f0e7f3; background: #211a26d9; border: 1px solid #ffffff22; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity 0.25s; }
+.upgrade-status.visible { opacity: 1; }
+.upgrade-status:empty { display: none; }
+
+/* Selected soldier: a card that floats above him. */
+.soldier-card { position: absolute; left: 0; top: 0; width: 168px; padding: 9px 10px 9px; background: #201a27; border: 1px solid #ffffff2e; border-radius: 5px; box-shadow: 0 8px 30px #100b1b55; font-size: 10px; z-index: 2; will-change: transform; }
+.soldier-card.offscreen { visibility: hidden; }
+.soldier-card.dead { opacity: 0.85; }
+.soldier-card-head { display: flex; align-items: baseline; gap: 6px; padding-right: 16px; }
+.soldier-card-head b { font: 9px Consolas, monospace; color: #a99aae; font-weight: normal; }
+.soldier-team { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.soldier-team.team-0 { color: #75ff32; }.soldier-team.team-1 { color: #ff6b5e; }
+.soldier-card-close { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border: 0; background: transparent; color: #b9a9bf; font-size: 15px; line-height: 1; border-radius: 3px; }
+.soldier-card-close:hover { background: #ffffff14; color: #fff; }
+.soldier-hp { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+.soldier-hp-bar { flex: 1; height: 5px; background: #ffffff1c; border-radius: 3px; overflow: hidden; }
+.soldier-hp-bar i { display: block; height: 100%; background: var(--green); border-radius: 3px; }
+.soldier-hp span { font: 8px Consolas, monospace; color: #cbbfd0; white-space: nowrap; }
+.soldier-kia { margin-top: 7px; font: 8px Consolas, monospace; letter-spacing: 0.12em; color: var(--red); }
+.soldier-guns { list-style: none; margin: 7px 0 0; padding: 0; display: grid; gap: 3px; }
+.soldier-guns li { display: flex; justify-content: space-between; gap: 6px; padding: 3px 6px; border-radius: 3px; background: #ffffff0a; color: #cdc1d2; }
+.soldier-guns li small { font: 7px Consolas, monospace; color: #9d8ca6; align-self: center; }
+.soldier-guns li.active { background: #c1fa8624; color: #fff; box-shadow: inset 2px 0 0 var(--green); }
+.soldier-guns li.unarmed { color: #9d8ca6; font-style: italic; }
+
+@media (max-width: 900px) { .upgrade-menu { right: 22px; } .upgrade-status { right: 114px; } }
+@media (max-width: 600px) {
+  .upgrade-menu { right: 16px; top: auto; bottom: max(212px, calc(env(safe-area-inset-bottom) + 190px)); transform: none; width: 66px; padding: 6px 5px 5px; }
+  .upgrade-button { padding: 7px 3px 5px; font-size: 9px; }
+  .upgrade-button svg { width: 19px; height: 19px; }
+  .upgrade-status { right: 92px; top: auto; bottom: max(232px, calc(env(safe-area-inset-bottom) + 210px)); transform: none; max-width: calc(100% - 120px); }
+  .soldier-card { width: 152px; }
+}
+@media (max-height: 560px) and (min-width: 601px) { .upgrade-menu { top: calc(50% - 20px); } }
