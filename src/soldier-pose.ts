@@ -11,21 +11,39 @@ export class SoldierPose {
   readonly rotation = new THREE.Quaternion();
   private readonly axis = new THREE.Vector3();
   private readonly turn = new THREE.Quaternion();
+  private readonly restingGun = new THREE.Quaternion();
+  private readonly offset = new THREE.Vector3();
+  private fall = 0;
 
   set(x: number, y: number, z: number, yaw: number, fall = 0, fallOffset = 0, roll = 0) {
     this.center.set(x, y, z);
+    this.fall = fall;
     this.rotation.setFromAxisAngle(UP, yaw);
     if (fall > 0) {
       this.axis.set(Math.cos(fallOffset), 0, -Math.sin(fallOffset));
       this.rotation.multiply(this.turn.setFromAxisAngle(this.axis, fall * Math.PI / 2));
       this.rotation.multiply(this.turn.setFromAxisAngle(UP, fall * roll));
+      this.restingGun.setFromAxisAngle(UP, yaw + fallOffset);
     }
   }
 
-  gun(target: THREE.Object3D, size: number, aimPitch: number) {
+  alignToGround(tilt: THREE.Quaternion) {
+    this.rotation.premultiply(tilt);
+    this.restingGun.premultiply(tilt);
+  }
+
+  gun(target: THREE.Object3D, radius: number, aimPitch: number) {
+    const size = radius / CONFIG.soldier.radius;
     target.position.set(0.20 * size, 0.69 - HALF_HEIGHT, 0.34 * size)
       .applyQuaternion(this.rotation).add(this.center);
     target.quaternion.copy(this.rotation).multiply(this.turn.setFromAxisAngle(RIGHT, -aimPitch));
+    if (this.fall > 0) {
+      // As the soldier rolls, the weapon comes to rest along its side.
+      const progress = this.fall * this.fall;
+      this.offset.set(0.40 * size, 0.10 - radius, 0).applyQuaternion(this.restingGun).add(this.center);
+      target.position.lerp(this.offset, progress);
+      target.quaternion.slerp(this.restingGun, progress);
+    }
   }
 
   visor(target: THREE.Object3D, radius: number) {

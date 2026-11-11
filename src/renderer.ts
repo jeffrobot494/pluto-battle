@@ -400,7 +400,7 @@ export class BattleRenderer {
       this.hitAttribute.setX(count, Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000);
 
       const size = radius / CONFIG.soldier.radius;
-      pose.gun(this.dummy, size, sim.aimPitch[i]);
+      pose.gun(this.dummy, radius, sim.aimPitch[i]);
       setGunScale(this.dummy.scale, sim.weapon[i], fade);
       this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
       pose.visor(this.dummy, radius);

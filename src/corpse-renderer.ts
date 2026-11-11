@@ -207,14 +207,14 @@ export class CorpseRenderer {
     const dummy = this.dummy, slope = this.tilt.identity().slerp(tilt, fall);
     const pose = this.pose;
     pose.set(x, y, z, yaw, 1, fallOffset, roll);
-    pose.rotation.premultiply(slope);
+    pose.alignToGround(slope);
     dummy.position.copy(pose.center);
     dummy.quaternion.copy(pose.rotation);
     dummy.scale.setScalar(1);
     dummy.updateMatrix();
     body.setMatrix(slot, dummy.matrix);
 
-    pose.gun(dummy, size, aimPitch);
+    pose.gun(dummy, radius, aimPitch);
     setGunScale(dummy.scale, weapon, 1);
     this.write(this.guns, slot);
 
