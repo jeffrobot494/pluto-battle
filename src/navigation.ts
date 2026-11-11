@@ -36,6 +36,9 @@ class Heap {
 const OPEN_CLEARANCE = 2.6, NARROW_PENALTY = 4;
 /** Clearance an army approach must keep end to end (distance from a cell centre to the nearest blocked cell). */
 export const WIDE_CLEARANCE = 1.25;
+/** Friendly density (soldiers per cell, 3x3-averaged) where the congestion cost starts and where it saturates.
+ * The starting formation sits just under the start; a jammed crowd reaches the full cost. */
+const CONGESTION_START = 0.5, CONGESTION_FULL = 1.4;
 /** Chamfer distance from each cell to the nearest blocked cell or map edge. */
 function clearanceMap(walkable: Uint8Array, columns: number, rows: number, dx: number, dz: number) {
   const size = columns * rows, d = new Float32Array(size), diagonal = Math.hypot(dx, dz);
@@ -56,9 +59,11 @@ class FlowField {
   readonly distance: Float32Array;
   readonly pending: Float32Array;
   readonly heap: Heap;
+  /** Extra cost multiplier per node from friendly crowding, snapshotted when the build begins. */
+  readonly congestion: Float32Array;
   ready = false;
   building = false;
-  constructor(size: number) { this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending); }
+  constructor(size: number) { this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending); this.congestion = new Float32Array(size); }
 }
 
 /** Static clearance graph + two shared, incrementally rebuilt multi-source fields.
@@ -88,6 +93,8 @@ export class Navigation {
   private readonly pathPriority: Float32Array;
   private readonly pathParent: Int32Array;
   private readonly pathHeap: Heap;
+  private readonly occupancy: Float32Array;
+  private readonly blur: Float32Array;
   constructor(terrain: Terrain, radius: number) {
     this.terrain = terrain; this.radius = radius;
     const start = performance.now(), size = terrain.columns * terrain.rows;
@@ -97,6 +104,7 @@ export class Navigation {
     this.costs = DX.map((x, i) => Math.hypot(x * terrain.dx, DZ[i] * terrain.dz));
     this.fields = [new FlowField(size), new FlowField(size)];
     this.pathScore = new Float32Array(size); this.pathPriority = new Float32Array(size); this.pathParent = new Int32Array(size); this.pathHeap = new Heap(this.pathPriority);
+    this.occupancy = new Float32Array(size); this.blur = new Float32Array(size);
     for (let node = 0; node < size; node++) { this.walkable[node] = +terrain.canStand(this.x(node), this.z(node), radius + 0.035); this.elevation[node] = terrain.heightAt(this.x(node), this.z(node)); }
     for (let node = 0; node < size; node++) if (this.walkable[node]) {
       const c = node % terrain.columns, r = Math.floor(node / terrain.columns), x = this.x(node), z = this.z(node);
@@ -132,11 +140,33 @@ export class Navigation {
     }
     return -1;
   }
-  beginField(team: number, goals: Int32Array, length: number) {
+  /**
+   * Starts an incremental rebuild toward `goals`. Optional `occupants` (cells of the team that will follow
+   * this field) add a congestion cost so overflow spreads onto alternate routes instead of piling into one lane.
+   */
+  beginField(team: number, goals: Int32Array, length: number, occupants?: Int32Array, occupantCount = 0, weight = 0) {
     const f = this.fields[team]; if (f.building) return;
+    this.computeCongestion(f.congestion, occupants, occupantCount, weight);
     f.pending.fill(Infinity); f.heap.clear();
     for (let i = 0; i < length; i++) { const node = goals[i]; if (node >= 0 && this.walkable[node] && f.pending[node] !== 0) { f.pending[node] = 0; f.heap.push(node); } }
     f.building = f.heap.length > 0;
+  }
+  private computeCongestion(out: Float32Array, occupants: Int32Array | undefined, count: number, weight: number) {
+    out.fill(0);
+    if (!occupants || count <= 0 || weight <= 0) return;
+    const columns = this.terrain.columns, rows = this.terrain.rows, occ = this.occupancy, blur = this.blur;
+    occ.fill(0);
+    for (let i = 0; i < count; i++) { const node = occupants[i]; if (node >= 0) occ[node]++; }
+    // Separable 3x3 box average: per-cell counts are too noisy to route around.
+    for (let r = 0; r < rows; r++) {
+      const row = r * columns;
+      for (let c = 0; c < columns; c++) blur[row + c] = (c > 0 ? occ[row + c - 1] : 0) + occ[row + c] + (c + 1 < columns ? occ[row + c + 1] : 0);
+    }
+    const span = CONGESTION_FULL - CONGESTION_START;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < columns; c++) {
+      const n = r * columns + c, density = ((r > 0 ? blur[n - columns] : 0) + blur[n] + (r + 1 < rows ? blur[n + columns] : 0)) / 9;
+      out[n] = density > CONGESTION_START ? weight * Math.min(1, (density - CONGESTION_START) / span) : 0;
+    }
   }
   advance(budget = 1024) {
     this.expansions = 0;
@@ -145,7 +175,7 @@ export class Navigation {
       if (!f.building) break;
       const node = f.heap.pop(); this.expansions++;
       for (let dir = 0; dir < 8; dir++) if (this.edges[node] & 1 << dir) {
-        const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * this.crowding[next] + Math.abs(this.elevation[node] - this.elevation[next]) * 0.25;
+        const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * (this.crowding[next] + f.congestion[next]) + Math.abs(this.elevation[node] - this.elevation[next]) * 0.25;
         if (cost < f.pending[next] - 1e-5) { f.pending[next] = cost; f.heap.push(next); }
       }
       if (!f.heap.length) { f.distance.set(f.pending); f.ready = true; f.building = false; }

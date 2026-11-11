@@ -126,6 +126,12 @@ export class BattleSimulation {
   readonly navigation: Navigation | null;
   private readonly goals: Int32Array[];
   private readonly goalCounts = new Uint16Array(2);
+  /** Cells of each team's soldiers that barely moved since the last field rebuild: the piles the field should route around. */
+  private readonly congested: Int32Array[];
+  private readonly congestedCounts = new Uint16Array(2);
+  /** Position at the last field rebuild, for the stationary test above. */
+  private readonly rebuildX: Float64Array;
+  private readonly rebuildZ: Float64Array;
   private readonly lastProgress: Float64Array;
   private readonly beamStamp: Uint32Array;
   private beamQuery = 0;
@@ -239,7 +245,9 @@ export class BattleSimulation {
     this.terrain = terrain ?? Terrain.flat(this.tuning.halfWidth, this.tuning.halfDepth);
     this.navigation = terrain ? navigation ?? new Navigation(terrain, this.tuning.radius) : null;
     this.y = new Float64Array(capacity); this.previousY = new Float64Array(capacity); this.aimPitch = new Float32Array(capacity); this.visible = new Uint8Array(capacity);
-    this.goals = [new Int32Array(capacity), new Int32Array(capacity)]; this.lastProgress = new Float64Array(capacity);
+    this.goals = [new Int32Array(capacity), new Int32Array(capacity)];
+    this.congested = [new Int32Array(capacity), new Int32Array(capacity)];
+    this.rebuildX = new Float64Array(capacity).fill(Infinity); this.rebuildZ = new Float64Array(capacity).fill(Infinity); this.lastProgress = new Float64Array(capacity);
     this.beamStamp = new Uint32Array(capacity);
     this.avoidanceX = new Float64Array(capacity); this.avoidanceZ = new Float64Array(capacity); this.nextRetarget = new Float64Array(capacity);
     this.updateDetourAngles();
@@ -393,6 +401,7 @@ export class BattleSimulation {
     this.hp[slot] = this.tuning.health; this.radius[slot] = r;
     this.detourSide[slot] = this.steeringRng() < 0.5 ? -1 : 1;
     this.team[slot] = team; this.weapon[slot] = weapon; this.inventory[slot] = 1 << weapon; this.target[slot] = 0; this.moving[slot] = 0;
+    this.rebuildX[slot] = this.rebuildZ[slot] = Infinity;
     this.upgrades[slot] = 0; this.upgradeWeapon[slot] = NO_WEAPON;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
@@ -697,13 +706,20 @@ export class BattleSimulation {
   private updateNavigation() {
     const nav = this.navigation; if (!nav) return;
     if (this.tick === 1 || this.tick % 60 === 0) {
-      this.goalCounts.fill(0);
+      this.goalCounts.fill(0); this.congestedCounts.fill(0);
+      // Stationary = covered under a quarter of a second's walk since the last rebuild (firing, holding or stuck).
+      const still = this.tuning.speed * 0.25;
       for (let i = 0; i < this.used; i++) if (this.hp[i] > 0) {
         const team = 1 - this.team[i], cell = this.terrain.cell(this.x[i], this.z[i]);
         const node = nav.walkable[cell] ? cell : nav.nodeAt(this.x[i], this.z[i]);
-        if (node >= 0) this.goals[team][this.goalCounts[team]++] = node;
+        if (node >= 0) {
+          this.goals[team][this.goalCounts[team]++] = node;
+          if (Math.hypot(this.x[i] - this.rebuildX[i], this.z[i] - this.rebuildZ[i]) < still) this.congested[this.team[i]][this.congestedCounts[this.team[i]]++] = node;
+        }
+        this.rebuildX[i] = this.x[i]; this.rebuildZ[i] = this.z[i];
       }
-      for (let team = 0; team < 2; team++) nav.beginField(team, this.goals[team], this.goalCounts[team]);
+      // Only stationary friendlies congest a team's field: a column on the march should not repel itself.
+      for (let team = 0; team < 2; team++) nav.beginField(team, this.goals[team], this.goalCounts[team], this.congested[team], this.congestedCounts[team], this.tuning.congestionCost);
     }
     nav.advance(1024);
   }
