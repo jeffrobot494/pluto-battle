@@ -39,6 +39,15 @@ export const WIDE_CLEARANCE = 1.25;
 /** Friendly density (soldiers per cell, 3x3-averaged) where the congestion cost starts and where it saturates.
  * The starting formation sits just under the start; a jammed crowd reaches the full cost. */
 const CONGESTION_START = 0.5, CONGESTION_FULL = 1.4;
+/** Firing positions: enemies are bucketed into FIRE_BLOCK x FIRE_BLOCK cell blocks (one sight target each).
+ * A cell with a shot at one is seeded at its straight-line distance + FIRE_SLACK, so it only beats walking
+ * where the route is much longer than the shot (cliff tops, ledges, across gaps). FIRE_MARGIN keeps seeds
+ * inside real range while enemies move between rebuilds; FIRE_EYE matches the soldiers' sight height. */
+const FIRE_BLOCK = 4, FIRE_SLACK = 3, FIRE_MARGIN = 0.6, FIRE_EYE = 0.7;
+/** A sight line is screened when it passes a cell next to a stationary friendly, ignoring this much at each end. */
+const SCREEN_CLEAR = 0.9;
+/** Per-tick work cap for the seeding phase (shared by both fields): sight rays, and candidate cells visited. */
+const FIRE_RAYS_PER_TICK = 160, FIRE_CELLS_PER_TICK = 1200;
 /** Chamfer distance from each cell to the nearest blocked cell or map edge. */
 function clearanceMap(walkable: Uint8Array, columns: number, rows: number, dx: number, dz: number) {
   const size = columns * rows, d = new Float32Array(size), diagonal = Math.hypot(dx, dz);
@@ -61,9 +70,27 @@ class FlowField {
   readonly heap: Heap;
   /** Extra cost multiplier per node from friendly crowding, snapshotted when the build begins. */
   readonly congestion: Float32Array;
+  /** Build number in which each node was last seeded as a firing position. */
+  readonly firing: Uint32Array;
+  /** 1 where a stationary friendly stands in the 3x3 neighbourhood: shots through here would hit our own line. */
+  readonly screen: Uint8Array;
+  build = 0;
+  firingSeeds = 0;
+  /** Seeding phase state: sight targets (one goal cell per block) and the cells still to test, in order. */
+  readonly reps: Int32Array;
+  readonly candidates: Int32Array;
+  repCount = 0;
+  candidateCount = 0;
+  cursor = 0;
+  range2 = 0;
+  /** True while firing positions are still being seeded; the Dijkstra sweep waits until they are all in. */
+  seeding = false;
   ready = false;
   building = false;
-  constructor(size: number) { this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending); this.congestion = new Float32Array(size); }
+  constructor(size: number, blocks: number) {
+    this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending);
+    this.congestion = new Float32Array(size); this.firing = new Uint32Array(size); this.screen = new Uint8Array(size); this.reps = new Int32Array(blocks); this.candidates = new Int32Array(size);
+  }
 }
 
 /** Static clearance graph + two shared, incrementally rebuilt multi-source fields.
@@ -95,6 +122,12 @@ export class Navigation {
   private readonly pathHeap: Heap;
   private readonly occupancy: Float32Array;
   private readonly blur: Float32Array;
+  // Firing-position gather scratch, stamped per query so nothing is cleared or allocated per rebuild.
+  private readonly fireBlocks: Uint32Array;
+  private readonly fireCells: Uint32Array;
+  private fireQuery = 0;
+  /** Running total of sight rays cast while seeding firing positions (diagnostics/benchmarks). */
+  fireRays = 0;
   constructor(terrain: Terrain, radius: number) {
     this.terrain = terrain; this.radius = radius;
     const start = performance.now(), size = terrain.columns * terrain.rows;
@@ -102,9 +135,11 @@ export class Navigation {
     this.offsets = DX.map((x, i) => x + DZ[i] * terrain.columns);
     this.elevation = new Float32Array(size);
     this.costs = DX.map((x, i) => Math.hypot(x * terrain.dx, DZ[i] * terrain.dz));
-    this.fields = [new FlowField(size), new FlowField(size)];
+    const blocks = Math.ceil(terrain.columns / FIRE_BLOCK) * Math.ceil(terrain.rows / FIRE_BLOCK);
+    this.fields = [new FlowField(size, blocks), new FlowField(size, blocks)];
     this.pathScore = new Float32Array(size); this.pathPriority = new Float32Array(size); this.pathParent = new Int32Array(size); this.pathHeap = new Heap(this.pathPriority);
     this.occupancy = new Float32Array(size); this.blur = new Float32Array(size);
+    this.fireBlocks = new Uint32Array(blocks); this.fireCells = new Uint32Array(size);
     for (let node = 0; node < size; node++) { this.walkable[node] = +terrain.canStand(this.x(node), this.z(node), radius + 0.035); this.elevation[node] = terrain.heightAt(this.x(node), this.z(node)); }
     for (let node = 0; node < size; node++) if (this.walkable[node]) {
       const c = node % terrain.columns, r = Math.floor(node / terrain.columns), x = this.x(node), z = this.z(node);
@@ -143,17 +178,86 @@ export class Navigation {
   /**
    * Starts an incremental rebuild toward `goals`. Optional `occupants` (cells of the team that will follow
    * this field) add a congestion cost so overflow spreads onto alternate routes instead of piling into one lane.
+   * A positive `fireRange` also seeds cells that have a shot at the goals, so the field leads to vantage
+   * points (e.g. a cliff overlooking the enemy) that have no short walking route to them.
    */
-  beginField(team: number, goals: Int32Array, length: number, occupants?: Int32Array, occupantCount = 0, weight = 0) {
+  beginField(team: number, goals: Int32Array, length: number, occupants?: Int32Array, occupantCount = 0, weight = 0, fireRange = 0) {
     const f = this.fields[team]; if (f.building) return;
-    this.computeCongestion(f.congestion, occupants, occupantCount, weight);
-    f.pending.fill(Infinity); f.heap.clear();
+    this.computeCongestion(f, occupants, occupantCount, weight);
+    f.pending.fill(Infinity); f.heap.clear(); f.build++; f.firingSeeds = 0; f.candidateCount = f.cursor = 0;
     for (let i = 0; i < length; i++) { const node = goals[i]; if (node >= 0 && this.walkable[node] && f.pending[node] !== 0) { f.pending[node] = 0; f.heap.push(node); } }
     f.building = f.heap.length > 0;
+    if (fireRange > FIRE_MARGIN && f.building) this.gatherFiring(f, goals, length, fireRange - FIRE_MARGIN);
+    f.seeding = f.candidateCount > 0;
   }
-  private computeCongestion(out: Float32Array, occupants: Int32Array | undefined, count: number, weight: number) {
-    out.fill(0);
-    if (!occupants || count <= 0 || weight <= 0) return;
+  /** Picks one sight target per FIRE_BLOCK block of goals and lists the walkable cells within `range` of any. */
+  private gatherFiring(f: FlowField, goals: Int32Array, length: number, range: number) {
+    const t = this.terrain, columns = t.columns, rows = t.rows, blockColumns = Math.ceil(columns / FIRE_BLOCK);
+    const reps = f.reps, blocks = this.fireBlocks, cells = this.fireCells, candidates = f.candidates;
+    if (++this.fireQuery === 0xffffffff) { blocks.fill(0); cells.fill(0); this.fireQuery = 1; }
+    const query = this.fireQuery;
+    let repCount = 0, candidateCount = 0;
+    for (let i = 0; i < length; i++) {
+      const node = goals[i]; if (node < 0) continue;
+      const c = node % columns, r = (node - c) / columns, block = Math.floor(r / FIRE_BLOCK) * blockColumns + Math.floor(c / FIRE_BLOCK);
+      if (blocks[block] !== query) { blocks[block] = query; reps[repCount++] = node; }
+    }
+    const reachC = Math.ceil(range / t.dx), reachR = Math.ceil(range / t.dz);
+    for (let k = 0; k < repCount; k++) {
+      const node = reps[k], c = node % columns, r = (node - c) / columns;
+      for (let rr = Math.max(0, r - reachR); rr <= Math.min(rows - 1, r + reachR); rr++) for (let cc = Math.max(0, c - reachC); cc <= Math.min(columns - 1, c + reachC); cc++) {
+        const n = rr * columns + cc;
+        if (cells[n] !== query && this.walkable[n] && f.pending[n] !== 0 && f.congestion[n] === 0) { cells[n] = query; candidates[candidateCount++] = n; }
+      }
+    }
+    f.repCount = repCount; f.candidateCount = candidateCount; f.range2 = range * range;
+  }
+  /**
+   * Seeds listed cells that have clear sight (eye to eye, within range in 3D) to one of their two nearest sight
+   * targets, until the shared budgets run out; returns the rays left. Cells the previous field already reaches
+   * for less than the seed would cost skip their rays unless they were seeded last build (keeps seeds stable).
+   */
+  private seedFiring(f: FlowField, rays: number, visits: number) {
+    const t = this.terrain, reps = f.reps, previous = f.build - 1;
+    for (; f.cursor < f.candidateCount && rays > 0 && visits > 0; f.cursor++, visits--) {
+      const n = f.candidates[f.cursor], x = this.x(n), z = this.z(n), y = this.elevation[n];
+      let a = -1, b = -1, da = Infinity, db = Infinity;
+      for (let q = 0; q < f.repCount; q++) {
+        const m = reps[q], d = (this.x(m) - x) ** 2 + (this.z(m) - z) ** 2 + (this.elevation[m] - y) ** 2;
+        if (d > f.range2) continue;
+        if (d < da) { b = a; db = da; a = m; da = d; } else if (d < db) { b = m; db = d; }
+      }
+      if (a < 0) continue;
+      // Already cheap to reach: a seed would change nothing, so skip the rays.
+      if (f.firing[n] !== previous && f.distance[n] <= Math.sqrt(da) + FIRE_SLACK) continue;
+      let cost = -1;
+      for (let pass = 0; pass < 2 && cost < 0; pass++) {
+        const m = pass ? b : a, d = pass ? db : da;
+        if (m < 0) break;
+        // Standing behind our own firing line is no vantage point (shots there are blocked by friendlies).
+        if (this.screened(f.screen, x, z, this.x(m), this.z(m))) continue;
+        rays--; this.fireRays++;
+        if (t.visible(x, y + FIRE_EYE, z, this.x(m), this.elevation[m] + FIRE_EYE, this.z(m))) cost = Math.sqrt(d) + FIRE_SLACK;
+      }
+      if (cost < 0 || cost >= f.pending[n]) continue;
+      f.pending[n] = cost; f.heap.push(n); f.firing[n] = f.build; f.firingSeeds++;
+    }
+    if (f.cursor >= f.candidateCount) f.seeding = false;
+    return { rays, visits };
+  }
+  /** Whether the ground track from (x, z) to (tx, tz) crosses a screened cell, away from both ends. */
+  private screened(screen: Uint8Array, x: number, z: number, tx: number, tz: number) {
+    const length = Math.hypot(tx - x, tz - z), step = 0.5 * Math.min(this.terrain.dx, this.terrain.dz);
+    for (let s = SCREEN_CLEAR; s < length - SCREEN_CLEAR; s += step) {
+      const k = s / length;
+      if (screen[this.terrain.cell(x + (tx - x) * k, z + (tz - z) * k)]) return true;
+    }
+    return false;
+  }
+  private computeCongestion(f: FlowField, occupants: Int32Array | undefined, count: number, weight: number) {
+    const out = f.congestion;
+    out.fill(0); f.screen.fill(0);
+    if (!occupants || count <= 0) return;
     const columns = this.terrain.columns, rows = this.terrain.rows, occ = this.occupancy, blur = this.blur;
     occ.fill(0);
     for (let i = 0; i < count; i++) { const node = occupants[i]; if (node >= 0) occ[node]++; }
@@ -164,15 +268,20 @@ export class Navigation {
     }
     const span = CONGESTION_FULL - CONGESTION_START;
     for (let r = 0; r < rows; r++) for (let c = 0; c < columns; c++) {
-      const n = r * columns + c, density = ((r > 0 ? blur[n - columns] : 0) + blur[n] + (r + 1 < rows ? blur[n + columns] : 0)) / 9;
-      out[n] = density > CONGESTION_START ? weight * Math.min(1, (density - CONGESTION_START) / span) : 0;
+      const n = r * columns + c, around = (r > 0 ? blur[n - columns] : 0) + blur[n] + (r + 1 < rows ? blur[n + columns] : 0), density = around / 9;
+      f.screen[n] = +(around > 0);
+      out[n] = weight > 0 && density > CONGESTION_START ? weight * Math.min(1, (density - CONGESTION_START) / span) : 0;
     }
   }
   advance(budget = 1024) {
     this.expansions = 0;
+    // Seeding comes first and is capped per tick; a field's sweep starts once all its seeds are in.
+    let rays = FIRE_RAYS_PER_TICK, visits = FIRE_CELLS_PER_TICK;
+    for (const f of this.fields) if (f.seeding && rays > 0 && visits > 0) ({ rays, visits } = this.seedFiring(f, rays, visits));
+    const sweeping = (f: FlowField) => f.building && !f.seeding;
     for (let turn = 0; turn < budget; turn++) {
-      const f = this.fields[turn & 1].building ? this.fields[turn & 1] : this.fields[1 - (turn & 1)];
-      if (!f.building) break;
+      const f = sweeping(this.fields[turn & 1]) ? this.fields[turn & 1] : this.fields[1 - (turn & 1)];
+      if (!sweeping(f)) break;
       const node = f.heap.pop(); this.expansions++;
       for (let dir = 0; dir < 8; dir++) if (this.edges[node] & 1 << dir) {
         const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * (this.crowding[next] + f.congestion[next]) + Math.abs(this.elevation[node] - this.elevation[next]) * 0.25;

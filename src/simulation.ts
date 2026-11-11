@@ -719,7 +719,8 @@ export class BattleSimulation {
         this.rebuildX[i] = this.x[i]; this.rebuildZ[i] = this.z[i];
       }
       // Only stationary friendlies congest a team's field: a column on the march should not repel itself.
-      for (let team = 0; team < 2; team++) nav.beginField(team, this.goals[team], this.goalCounts[team], this.congested[team], this.congestedCounts[team], this.tuning.congestionCost);
+      // Rifle range also seeds vantage points with a shot at the enemy, whether or not a short walk reaches it.
+      for (let team = 0; team < 2; team++) nav.beginField(team, this.goals[team], this.goalCounts[team], this.congested[team], this.congestedCounts[team], this.tuning.congestionCost, this.tuning.range);
     }
     nav.advance(1024);
   }
