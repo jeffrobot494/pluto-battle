@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BattleSimulation } from '../src/simulation.ts';
 import { WEAPON_ID } from '../src/config.ts';
-import { UPGRADES, zoneRadius } from '../src/upgrades.ts';
+import { UPGRADE_TARGETS, UPGRADES, zoneRadius } from '../src/upgrades.ts';
 
 const bit = (w: number) => 1 << w;
 /** A rifleman facing one stationary enemy `distance` away, ready to fire. */
@@ -55,6 +55,21 @@ test('area upgrades reach only living soldiers of the given team inside the radi
   assert.deepEqual([near, edge, far, enemy, dead].map(has), [true, true, false, false, false]);
   assert.equal(sim.upgradeCandidates(0, 0, 0, 3, WEAPON_ID.sniper), 0);
   assert.equal(sim.upgrades[sim.byId.get(near)!], 1);
+});
+
+test('area upgrades work the same for the Sectoids', () => {
+  const sim = new BattleSimulation(0);
+  const friend = sim.spawn(0, 0, 0)!, enemy = sim.spawn(1, 1, 1)!, far = sim.spawn(1, 9, 0)!;
+  const has = (id: number) => !!(sim.inventory[sim.byId.get(id)!] & bit(WEAPON_ID.shotgun));
+  assert.equal(sim.upgradeCandidates(1, 0, 0, 3, WEAPON_ID.shotgun), 1);
+  sim.queue({ type: 'upgradeArea', team: 1, x: 0, z: 0, radius: 3, weapon: WEAPON_ID.shotgun }); sim.flushCommands();
+  assert.deepEqual([friend, enemy, far].map(has), [false, true, false]);
+  sim.queue({ type: 'upgrade', ids: [far], weapon: WEAPON_ID.shotgun }); sim.flushCommands();
+  assert.ok(has(far), 'a single Sectoid can be upgraded too');
+});
+
+test('upgrade targets cover each army and both', () => {
+  assert.deepEqual(UPGRADE_TARGETS.map(t => [t.id, [...t.teams]]), [['plutonians', [0]], ['sectoids', [1]], ['both', [0, 1]]]);
 });
 
 test('upgrades are ignored after the battle ends and invalid weapons are rejected', () => {

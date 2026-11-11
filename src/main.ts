@@ -18,7 +18,7 @@ import { UpgradeMenu } from './upgrade-menu.ts';
 import { SoldierCard } from './soldier-card.ts';
 import { BattleRoster, loadRoster, saveRoster } from './soldiers.ts';
 import { SoldierList, SoldiersTab } from './soldiers-panel.ts';
-import { NEUTRAL_ZONE_COLOR, PLAYER_TEAM, UPGRADES, zoneRadius, type Upgrade, type UpgradeId } from './upgrades.ts';
+import { NEUTRAL_ZONE_COLOR, TARGET_KEY, UPGRADE_TARGETS, UPGRADES, zoneRadius, type Upgrade, type UpgradeId, type UpgradeTarget, type UpgradeTargetId } from './upgrades.ts';
 
 const icons = {
   pause: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M5 4h3v12H5zm7 0h3v12h-3z"/></svg>',
@@ -53,7 +53,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <nav class="battle-controls" aria-label="Battle controls"><button id="pause" class="primary">${icons.pause}<span>Pause</span></button><button id="restart" title="Restart on this map (R)">${icons.restart}<span>Restart</span></button><button id="new-map" title="New battle on a new map (N)">${icons.map}<span>New map</span></button><button id="center">${icons.focus}<span>Center view</span></button></nav>
       <button id="diagnostics-toggle" class="performance-badge" aria-expanded="false" aria-controls="diagnostics" title="Performance and battle settings (D)">${icons.stats}<strong id="fps-label">—</strong><span>FPS</span></button>
     </footer>
-    <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1 / 2 UPGRADE</div>
+    <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1 / 2 / 3 UPGRADE <span>·</span> S ARMY</div>
     <details id="sound-panel" class="sound-panel">
       <summary>${icons.sound}<span>Sound effects</span><span id="sound-state">TAP TO ENABLE</span><span class="sound-chevron" aria-hidden="true">⌃</span></summary>
       <div class="sound-settings">
@@ -147,17 +147,20 @@ function updateZone(now: number) {
   renderer.setZone(zone.point, zone.radius * (zone.released ? 1 + (1 - fade) * 0.06 : 1), zone.color, fade);
 }
 
-/** Gives `upgrade` to friendly soldiers; returns how many gained a new weapon. */
-function upgradeArea(upgrade: Upgrade, point: { x: number; z: number }, radius: number) {
+/** Gives `upgrade` to the target army's soldiers in the zone; returns how many gained a new weapon. */
+function upgradeArea(upgrade: Upgrade, point: { x: number; z: number }, radius: number, target: UpgradeTarget = upgradeMenu.target) {
   if (sim.result !== 'running') return 0;
-  const count = sim.upgradeCandidates(PLAYER_TEAM, point.x, point.z, radius, upgrade.weapon);
-  sim.queue({ type: 'upgradeArea', team: PLAYER_TEAM, x: point.x, z: point.z, radius, weapon: upgrade.weapon });
+  let count = 0;
+  for (const team of target.teams) {
+    count += sim.upgradeCandidates(team, point.x, point.z, radius, upgrade.weapon);
+    sim.queue({ type: 'upgradeArea', team, x: point.x, z: point.z, radius, weapon: upgrade.weapon });
+  }
   if (paused) { sim.flushCommands(); soldierCard.update(sim); }
   return count;
 }
 function upgradeSoldier(upgrade: Upgrade, id: number) {
   const i = sim.byId.get(id);
-  if (i === undefined || sim.result !== 'running' || sim.hp[i] <= 0 || sim.team[i] !== PLAYER_TEAM) return false;
+  if (i === undefined || sim.result !== 'running' || sim.hp[i] <= 0) return false;
   const gained = !(sim.inventory[i] & (1 << upgrade.weapon));
   sim.queue({ type: 'upgrade', ids: [id], weapon: upgrade.weapon });
   if (paused) sim.flushCommands();
@@ -174,7 +177,7 @@ function onTap(clientX: number, clientY: number) {
   const slot = renderer.pickSoldier(clientX, clientY, sim);
   if (slot < 0) { selectSoldier(0); return; }
   const id = sim.id[slot], upgrade = upgradeMenu.selected;
-  if (upgrade && sim.team[slot] === PLAYER_TEAM) {
+  if (upgrade && sim.hp[slot] > 0) {
     if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
     else upgradeMenu.say(upgradeSoldier(upgrade, id) ? `Soldier #${id} → ${upgrade.name}` : `Soldier #${id} already carries a ${upgrade.name.toLowerCase()}`);
   }
@@ -190,7 +193,7 @@ const input = new BattleInput(renderer.webgl.domElement, {
     zone.radius = zoneRadius((now - zone.start) / 1000, maxZoneRadius()); zone.color = zoneColor();
     if (commit && upgrade) {
       if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
-      else { const count = upgradeArea(upgrade, zone.point, zone.radius); upgradeMenu.say(count ? `${count} soldier${count === 1 ? '' : 's'} → ${upgrade.name}` : `No Plutonians in range without a ${upgrade.name.toLowerCase()}`); }
+      else { const count = upgradeArea(upgrade, zone.point, zone.radius); upgradeMenu.say(count ? `${count} soldier${count === 1 ? '' : 's'} → ${upgrade.name}` : `No ${upgradeMenu.target.id === 'both' ? 'soldiers' : upgradeMenu.target.name} in range without a ${upgrade.name.toLowerCase()}`); }
     }
     // A canceled hold just disappears; a released one fades out.
     if (commit) zone.released = now; else { zone = null; renderer.setZone(null); }
@@ -408,6 +411,7 @@ document.addEventListener('keydown', event => {
   const typing = event.target instanceof Element && event.target.closest('input, select, textarea');
   const upgrade = typing || event.repeat ? undefined : UPGRADES.find(u => event.code === `Digit${u.key}` || event.code === `Numpad${u.key}`);
   if (upgrade) { upgradeMenu.toggle(upgrade.id); return; }
+  if (!typing && !event.repeat && event.code === `Key${TARGET_KEY}`) { upgradeMenu.cycleTarget(); return; }
   if (event.code !== 'Escape' && event.target instanceof Element && event.target.closest('input, select, button, summary')) return;
   if (event.code === 'Escape' && typing) return;
   if (event.code === 'Space') { event.preventDefault(); setPaused(!paused); }
@@ -475,7 +479,13 @@ const api = {
   explode,
   get upgrade() { return upgradeMenu.selected?.id ?? null; },
   selectUpgrade(id: UpgradeId | null) { upgradeMenu.select(id); },
-  upgradeArea(id: UpgradeId, x: number, z: number, radius: number) { const u = UPGRADES.find(u => u.id === id); return u ? upgradeArea(u, { x, z }, radius) : 0; },
+  get upgradeTarget() { return upgradeMenu.target.id; },
+  setUpgradeTarget(id: UpgradeTargetId) { upgradeMenu.setTarget(id); },
+  /** Upgrades an area for `target` (default: the rail's current target). */
+  upgradeArea(id: UpgradeId, x: number, z: number, radius: number, target?: UpgradeTargetId) {
+    const u = UPGRADES.find(u => u.id === id), t = target ? UPGRADE_TARGETS.find(t => t.id === target) : upgradeMenu.target;
+    return u && t ? upgradeArea(u, { x, z }, radius, t) : 0;
+  },
   get selectedSoldier() { return soldierCard.selectedId; },
   roster, get battleRoster() { return battleRoster; }, resetRoster,
   openSoldierList(open = true) { soldierList.toggle(open, battleRoster); },

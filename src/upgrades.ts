@@ -17,8 +17,19 @@ export const UPGRADES = [
 export type Upgrade = typeof UPGRADES[number];
 export type UpgradeId = Upgrade['id'];
 
-/** The army the player commands. */
-export const PLAYER_TEAM: Team = 0;
+/**
+ * Which army a held zone upgrades. The sandbox gives equal control over both sides;
+ * a tap always upgrades the soldier tapped, whatever the target.
+ */
+export const UPGRADE_TARGETS = [
+  { id: 'plutonians', label: 'PLU', name: 'Plutonians', teams: [0] as readonly Team[], color: 'var(--green)' },
+  { id: 'sectoids', label: 'SEC', name: 'Sectoids', teams: [1] as readonly Team[], color: 'var(--red)' },
+  { id: 'both', label: 'BOTH', name: 'both armies', teams: [0, 1] as readonly Team[], color: '#ece6f0' },
+] as const;
+export type UpgradeTarget = typeof UPGRADE_TARGETS[number];
+export type UpgradeTargetId = UpgradeTarget['id'];
+/** Key that cycles the upgrade target. */
+export const TARGET_KEY = 'S';
 /** Ability-zone colour when no action is armed. */
 export const NEUTRAL_ZONE_COLOR = '#ece6f0';
 

@@ -91,7 +91,7 @@ try {
   await page.mouse.up();
   assert.equal(await page.evaluate(() => window.__battle.sim.totalUpgrades), before);
 
-  // Tap-upgrading one soldier with the shotgun armed; enemies can be inspected but not upgraded.
+  // Tap-upgrading one soldier with the shotgun armed works on either army.
   f = await fixture(page); await page.keyboard.press('2');
   await page.mouse.click(f.soldiers[3].x, f.soldiers[3].y);
   assert.ok(has(await inventory(page, 3), SHOTGUN)); assert.ok(!has(await inventory(page, 1), SHOTGUN));
@@ -99,8 +99,38 @@ try {
   assert.match(await page.textContent('#soldier-card'), /Laser rifle[\s\S]*Shotgun/);
   await page.mouse.click(f.soldiers[5].x, f.soldiers[5].y);
   assert.equal(await page.evaluate(() => window.__battle.selectedSoldier), f.ids[5]);
-  assert.ok(!has(await inventory(page, 5), SHOTGUN));
-  assert.match(await page.textContent('#soldier-card'), /Sectoid/);
+  assert.ok(has(await inventory(page, 5), SHOTGUN), 'tapped Sectoid upgraded');
+  assert.match(await page.textContent('#soldier-card'), /Sectoid[\s\S]*Shotgun/);
+  assert.match(await page.textContent('#upgrade-status'), new RegExp(`Soldier #${f.ids[5]} → Shotgun`));
+
+  // The army switch: S cycles Plutonians → Sectoids → both; clicks pick directly.
+  const target = () => page.evaluate(() => window.__battle.upgradeTarget);
+  const checked = () => page.$$eval('[data-target]', buttons => buttons.map(b => b.getAttribute('aria-checked')).join(','));
+  assert.equal(await target(), 'plutonians'); assert.equal(await checked(), 'true,false,false');
+  await page.keyboard.press('s'); assert.equal(await target(), 'sectoids'); assert.equal(await checked(), 'false,true,false');
+  await page.keyboard.press('s'); assert.equal(await target(), 'both');
+  await page.keyboard.press('s'); assert.equal(await target(), 'plutonians');
+  await page.click('[data-target="sectoids"]'); assert.equal(await target(), 'sectoids');
+  assert.match(await page.textContent('#upgrade-status'), /Shotgun → Sectoids/);
+  await page.screenshot({ path: 'artifacts/upgrade-target-sectoids.png' });
+
+  // A Sectoid-targeted zone over the enemy line upgrades only Sectoids; one over the friends finds nobody.
+  f = await fixture(page); await page.keyboard.press('1');
+  const enemyCenter = await page.evaluate(() => { const p = window.__battle.renderer.project(1.5, 0, -20); return { x: (p.x + 1) * innerWidth / 2, y: (1 - p.y) * innerHeight / 2 }; });
+  await page.mouse.move(enemyCenter.x, enemyCenter.y); await page.mouse.down(); await wait(800); await page.mouse.up();
+  const enemyUpgraded = [];
+  for (const slot of [4, 5, 6, 7]) enemyUpgraded.push(has(await inventory(page, slot), SNIPER));
+  assert.ok(enemyUpgraded.filter(Boolean).length >= 2, `enemies upgraded ${enemyUpgraded}`);
+  for (const slot of [0, 1, 2, 3]) assert.ok(!has(await inventory(page, slot), SNIPER), 'friends unchanged by a Sectoid zone');
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down(); await wait(500); await page.mouse.up();
+  for (const slot of [0, 1, 2]) assert.ok(!has(await inventory(page, slot), SNIPER), 'friends still unchanged');
+  assert.match(await page.textContent('#upgrade-status'), /No Sectoids in range/);
+
+  // "Both" reaches every soldier in the zone.
+  f = await fixture(page); await page.click('[data-target="both"]');
+  assert.equal(await page.evaluate(() => window.__battle.upgradeArea('shotgun', 0, -10, 999)), 8);
+  for (let slot = 0; slot < 8; slot++) assert.ok(has(await inventory(page, slot), SHOTGUN), `both upgraded ${slot}`);
+  await page.click('[data-target="plutonians"]');
 
   // A live battle: upgraded friends switch weapons and fire.
   await page.evaluate(() => { const g = window.__battle; g.restart(4); g.setPaused(true); });
@@ -131,6 +161,9 @@ try {
     return { rail: box('#upgrade-menu'), zoom: box('.view-controls'), bar: box('.bottom-bar') };
   });
   assert.ok(layout.rail.right <= 412 && layout.rail.bottom < layout.zoom.top, JSON.stringify(layout));
+  await mobile.tap('[data-target="sectoids"]');
+  assert.equal(await mobile.evaluate(() => window.__battle.upgradeTarget), 'sectoids');
+  await mobile.tap('[data-target="plutonians"]');
   await mobile.tap('[data-upgrade="sniper"]');
   assert.equal(await mobile.getAttribute('[data-upgrade="sniper"]', 'aria-pressed'), 'true');
   const cdp = await phone.newCDPSession(mobile);

@@ -180,6 +180,10 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 /* Upgrade rail: mutually exclusive weapon toggles on the right edge. */
 .upgrade-menu { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 6px 6px; width: 80px; background: #221b27b8; border: 1px solid #ffffff26; border-radius: 6px; backdrop-filter: blur(10px); z-index: 2; }
 .upgrade-title { font: 7px Consolas, monospace; letter-spacing: 0.16em; color: #b8a8bf; text-align: center; }
+.upgrade-target { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 1px; padding: 1px; background: #ffffff1a; border-radius: 4px; }
+.upgrade-target button { padding: 5px 0; min-height: 22px; background: #2d2436; border: 0; border-radius: 3px; color: #a593ad; font: 7px Consolas, monospace; letter-spacing: 0.04em; transition: background 0.12s, color 0.12s; }
+.upgrade-target button:hover { color: var(--target); }
+.upgrade-target button[aria-checked="true"] { background: color-mix(in srgb, var(--target) 24%, #2d2436); color: var(--target); box-shadow: inset 0 0 0 1px var(--target); font-weight: 700; }
 .upgrade-button { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 4px 7px; background: #2d2436; border: 1px solid #ffffff22; border-radius: 4px; color: #ddd2e2; font-size: 10px; transition: border-color 0.12s, background 0.12s, box-shadow 0.12s; }
 .upgrade-button svg { width: 22px; height: 22px; color: var(--upgrade); }
 .upgrade-button small { font: 7px Consolas, monospace; color: #a593ad; letter-spacing: 0.06em; }
@@ -215,7 +219,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 @media (max-width: 900px) { .upgrade-menu { right: 22px; } .upgrade-status { right: 114px; } }
 @media (max-width: 600px) {
   .upgrade-menu { right: 16px; top: auto; bottom: max(212px, calc(env(safe-area-inset-bottom) + 190px)); transform: none; width: 66px; padding: 6px 5px 5px; }
-  .upgrade-button { padding: 7px 3px 5px; font-size: 9px; }
+  .upgrade-button { padding: 7px 3px 5px; font-size: 9px; } .upgrade-target button { min-height: 28px; font-size: 6px; letter-spacing: 0; }
   .upgrade-button svg { width: 19px; height: 19px; }
   .upgrade-status { right: 92px; top: auto; bottom: max(232px, calc(env(safe-area-inset-bottom) + 210px)); transform: none; max-width: calc(100% - 120px); }
   .soldier-card { width: 152px; }
