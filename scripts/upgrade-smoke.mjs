@@ -158,9 +158,18 @@ try {
   f = await fixture(mobile);
   const layout = await mobile.evaluate(() => {
     const box = s => document.querySelector(s).getBoundingClientRect().toJSON();
-    return { rail: box('#upgrade-menu'), bar: box('.battle-controls') };
+    return {
+      menu: box('#upgrade-menu'), bar: box('.battle-controls'), hints: box('.input-hint'),
+      weapons: [...document.querySelectorAll('.upgrade-button')].map(button => button.getBoundingClientRect().toJSON()),
+    };
   });
-  assert.ok(layout.rail.right <= 412 && layout.rail.top >= layout.bar.bottom && layout.rail.bottom <= 915, JSON.stringify(layout));
+  assert.equal(layout.menu.left, layout.bar.left);
+  assert.equal(layout.menu.right, layout.bar.right);
+  assert.ok(layout.menu.bottom <= layout.hints.top);
+  for (const [index, weapon] of layout.weapons.entries()) {
+    assert.equal(weapon.top, layout.weapons[0].top);
+    if (index > 0) assert.ok(weapon.left > layout.weapons[index - 1].right);
+  }
   await mobile.tap('[data-target="sectoids"]');
   assert.equal(await mobile.evaluate(() => window.__battle.upgradeTarget), 'sectoids');
   await mobile.tap('[data-target="plutonians"]');

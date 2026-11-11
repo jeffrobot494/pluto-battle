@@ -166,6 +166,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 #viewport canvas.upgrade-cursor { cursor: crosshair; }
 
 /* Upgrade rail: mutually exclusive weapon toggles on the right edge. */
+.upgrade-controls { display: contents; }
 .upgrade-menu { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 6px 6px; width: 80px; background: #221b27b8; border: 1px solid #ffffff26; border-radius: 6px; backdrop-filter: blur(10px); z-index: 2; }
 .upgrade-title { font: 7px Consolas, monospace; letter-spacing: 0.16em; color: #b8a8bf; text-align: center; }
 .upgrade-target { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 1px; padding: 1px; background: #ffffff1a; border-radius: 4px; }
@@ -231,7 +232,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .soldier-list li.empty { color: #9d8aa9; cursor: default; }
 
 .mobile-hud {
-  --hud-top: max(10px, env(safe-area-inset-top));
+  --hud-top: 10px;
   --hud-left: max(16px, env(safe-area-inset-left));
   --hud-right: max(16px, env(safe-area-inset-right));
   --hud-bottom: max(12px, env(safe-area-inset-bottom));
@@ -327,5 +328,25 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
   padding: 25px 20px;
 }
 .mobile-hud .outcome h2 { font-size: 25px; }
-.mobile-hud .upgrade-menu { right: var(--hud-right); top: var(--battle-card-center); width: var(--rail-width); padding: 6px 5px 5px; }
-.mobile-hud .upgrade-status { right: calc(var(--hud-right) + var(--rail-width) + 8px); top: var(--battle-card-center); }
+.mobile-hud .upgrade-controls {
+  display: block;
+  position: absolute;
+  right: var(--hud-right);
+  bottom: calc(max(17px, env(safe-area-inset-bottom)) + 20px);
+  left: var(--hud-left);
+}
+.mobile-hud .upgrade-menu {
+  position: relative;
+  inset: auto;
+  transform: none;
+  width: auto;
+  display: grid;
+  grid-template-columns: minmax(66px, 1.25fr) repeat(3, minmax(0, 1fr));
+  grid-template-rows: 1fr 1fr;
+  row-gap: 3px;
+  padding: 6px 5px 5px;
+}
+.mobile-hud .upgrade-title { align-self: end; }
+.mobile-hud .upgrade-target { grid-column: 1; grid-row: 2; align-self: start; }
+.mobile-hud .upgrade-button { grid-row: 1 / -1; }
+.mobile-hud .upgrade-status { top: auto; right: 0; bottom: calc(100% + 6px); transform: none; max-width: min(260px, 100%); }
