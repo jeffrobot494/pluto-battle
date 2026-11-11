@@ -28,7 +28,7 @@ const icons = {
   focus: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4"/><circle cx="10" cy="10" r="2.5"/></svg>',
   stats: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 14h3l3-9 4 12 3-8h3"/></svg>',
   sound: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 8h3l4-4v12l-4-4H3zM13 7a5 5 0 0 1 0 6m3-9a9 9 0 0 1 0 12"/></svg>',
-  muted: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 8h3l4-4v12l-4-4H2zM12 7l6 6m0-6-6 6"/></svg>',
+  muted: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 8h3l4-4v12l-4-4H3zM13 7l6 6m0-6-6 6"/></svg>',
 };
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
