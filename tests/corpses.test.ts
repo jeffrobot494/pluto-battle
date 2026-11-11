@@ -6,11 +6,12 @@ import { CorpseRenderer } from '../src/corpse-renderer.ts';
 import { BattleSimulation } from '../src/simulation.ts';
 
 test('retirement captures a corpse before a queued spawn reuses its slot', () => {
-  const sim = new BattleSimulation(0, 9, 2);
+  const sim = new BattleSimulation(0, 5, 2);
   sim.tuning.speed = 0;
   const fallen = sim.spawn(0, 1, 0, WEAPON_ID.sniper)!;
   sim.spawn(1, 10, 10);
   sim.damage(fallen, 100);
+  const fallOffset = sim.deathFallOffset[0], roll = sim.deathRoll[0];
   // Arrange for the spawn to run on the first tick after expiry, before body integration.
   sim.time = CONFIG.corpseLifetime;
   sim.queue({ type: 'spawn', team: 0, x: -5, z: 0 });
@@ -21,13 +22,13 @@ test('retirement captures a corpse before a queued spawn reuses its slot', () =>
   assert.equal(sim.retiredCorpseCount, 1);
   assert.deepEqual(sim.retiredCorpses[0], {
     id: fallen, at: CONFIG.corpseLifetime, x: 1, y: 0, z: 0, velocityY: 0,
-    yaw: Math.fround(Math.PI), aimPitch: 0, radius: Math.fround(CONFIG.soldier.radius),
+    yaw: Math.fround(Math.PI), fallOffset, roll, aimPitch: 0, radius: Math.fround(CONFIG.soldier.radius),
     team: 0, weapon: WEAPON_ID.sniper,
   });
 });
 
 test('retained poses land, stop uploading, survive hide and show, and wrap the archive', () => {
-  const sim = new BattleSimulation(0, 9, 2);
+  const sim = new BattleSimulation(0, 5, 2);
   sim.tuning.speed = 0;
   const scene = new THREE.Scene();
   const geometry = new THREE.BoxGeometry(), material = new THREE.MeshStandardMaterial();
@@ -67,18 +68,27 @@ test('retained poses land, stop uploading, survive hide and show, and wrap the a
     assert.equal(mesh.visible, true);
     assert.equal(mesh.instanceMatrix.version, settledVersion);
 
-    for (let n = 0; n < CONFIG.retainedCorpses; n++) {
+    const batchSize = CONFIG.corpseRetentionGroup;
+    for (let deaths = 2; deaths <= (CONFIG.retainedCorpses + 1) * batchSize; deaths++) {
       const id = sim.spawn(0, -5, 0)!;
       sim.damage(id, 100);
       sim.time += CONFIG.corpseLifetime + CONFIG.step;
       sim.step();
+      if (deaths % batchSize === 0) assert.equal(sim.retiredCorpseCount, deaths / batchSize);
     }
     assert.equal(sim.retiredCorpseCount, CONFIG.retainedCorpses + 1);
     assert.equal(sim.retiredCorpses.some(corpse => corpse.id === fallen), false);
     assert.equal(corpses.update(sim, sim.time), CONFIG.retainedCorpses);
     assert.equal(mesh.count, CONFIG.retainedCorpses);
-    mesh.getMatrixAt(0, matrix);
-    assert.equal(matrix.elements[12], -5);
+    const headings = new Set<number>(), rolls = new Set<number>();
+    const axis = new THREE.Vector3();
+    for (let i = 0; i < mesh.count; i++) {
+      mesh.getMatrixAt(i, matrix);
+      assert.equal(matrix.elements[12], -5);
+      headings.add(Math.round(10 * axis.setFromMatrixColumn(matrix, 1).x));
+      rolls.add(Math.round(10 * axis.setFromMatrixColumn(matrix, 2).y));
+    }
+    assert.ok(headings.size > 10 && rolls.size > 10);
   } finally {
     corpses.dispose();
     source.dispose();

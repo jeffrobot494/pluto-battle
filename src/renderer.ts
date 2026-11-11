@@ -8,7 +8,8 @@ import { Terrain } from './terrain.ts';
 import { addTerrainWorld, loadBedrockDetail, paletteOf } from './terrain-renderer.ts';
 import type { GroundPoint } from './battle-input.ts';
 import { UPGRADES } from './upgrades.ts';
-import { CorpseRenderer, setGunScale, type CorpseArmor } from './corpse-renderer.ts';
+import { CorpseRenderer, type CorpseArmor } from './corpse-renderer.ts';
+import { SoldierPose, setGunScale } from './soldier-pose.ts';
 
 const teamColors = TEAM_COLORS.map(c => new THREE.Color(c));
 const bodyColors = [new THREE.Color('#20242b'), new THREE.Color('#925b3b')];
@@ -65,7 +66,7 @@ export class BattleRenderer {
   private width = 1;
   private height = 1;
   private cameraOffset = new THREE.Vector3();
-  private baseRotation = new THREE.Quaternion();
+  private readonly soldierPose = new SoldierPose();
   private axis = new THREE.Vector3(1, 0, 0);
   private shadowTexture: THREE.CanvasTexture;
   private readonly bedrockDetail: ReturnType<typeof loadBedrockDetail>;
@@ -385,22 +386,25 @@ export class BattleRenderer {
       const surface = sim.terrain.heightAt(x, z);
       // Grounded soldiers follow the interpolated terrain; airborne bodies and corpses use simulated height.
       const groundY = sim.hp[i] > 0 && sim.grounded[i] ? surface : THREE.MathUtils.lerp(sim.previousY[i], sim.y[i], alpha);
-      const yaw = sim.facing[i], fall = dead ? Math.min(1, age / 0.32) : 0;
-      const fade = dead && !sim.tuning.keepCorpses ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
+      const fall = dead ? THREE.MathUtils.clamp(age / 0.32, 0, 1) : 0;
+      const fade = dead && !(sim.tuning.keepCorpses && sim.pendingCorpse[i]) ? Math.min(1, (CONFIG.corpseLifetime - age) / 0.45) : 1;
       const bob = !dead && sim.grounded[i] && sim.moving[i] ? Math.sin(sim.time * 17 + i * 3.7) * 0.025 : 0;
-      this.dummy.position.set(x, groundY + CONFIG.soldier.height / 2 * (1 - fall) + sim.radius[i] * fall + bob, z);
-      this.dummy.rotation.set(fall * Math.PI / 2, yaw, 0, 'YXZ'); this.dummy.scale.setScalar(fade);
+      const radius = sim.radius[i], halfHeight = CONFIG.soldier.height / 2;
+      const height = dead ? radius + (halfHeight - radius) * Math.cos(fall * Math.PI / 2) : halfHeight;
+      const pose = this.soldierPose;
+      pose.set(x, groundY + height + bob, z, sim.facing[i], fall, sim.deathFallOffset[i], sim.deathRoll[i]);
+      this.dummy.position.copy(pose.center);
+      this.dummy.quaternion.copy(pose.rotation);
+      this.dummy.scale.setScalar(fade);
       this.dummy.updateMatrix(); this.bodies.setMatrixAt(count, this.dummy.matrix); this.bodies.setColorAt(count, bodyColors[sim.team[i]]);
       this.hitAttribute.setX(count, Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000);
 
-      this.baseRotation.setFromEuler(this.dummy.rotation);
-      const size = sim.radius[i] / CONFIG.soldier.radius;
-      this.dummy.position.set(x + (Math.sin(yaw) * 0.34 + Math.cos(yaw) * 0.20) * size, groundY + 0.69 * (1 - fall) + 0.18 * fall + bob, z + (Math.cos(yaw) * 0.34 - Math.sin(yaw) * 0.20) * size);
+      const size = radius / CONFIG.soldier.radius;
+      pose.gun(this.dummy, size, sim.aimPitch[i]);
       setGunScale(this.dummy.scale, sim.weapon[i], fade);
-      this.dummy.rotation.set(-sim.aimPitch[i], yaw, fall * Math.PI / 2, 'YXZ'); this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
+      this.dummy.updateMatrix(); this.guns.setMatrixAt(count, this.dummy.matrix);
+      pose.visor(this.dummy, radius);
       this.dummy.scale.setScalar(fade);
-      this.dummy.position.set(x + Math.sin(yaw) * 0.907 * sim.radius[i], groundY + 0.88 * (1 - fall) + 0.17 * fall + bob, z + Math.cos(yaw) * 0.907 * sim.radius[i]);
-      this.dummy.quaternion.copy(this.baseRotation);
       this.dummy.updateMatrix(); this.visors.setMatrixAt(count, this.dummy.matrix); this.visors.setColorAt(count, teamColors[sim.team[i]]);
       const aboveGround = Math.max(0, groundY - surface);
       this.dummy.position.set(x, surface + 0.025, z);

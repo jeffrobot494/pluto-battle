@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { CONFIG, NO_WEAPON, WEAPON_ID } from './config.ts';
+import { CONFIG } from './config.ts';
+import { SoldierPose, setGunScale } from './soldier-pose.ts';
 import type { BattleSimulation, RetiredCorpse } from './simulation.ts';
 import type { Terrain } from './terrain.ts';
 
@@ -95,14 +96,6 @@ interface Landing {
   progress: number;
 }
 
-export function setGunScale(scale: THREE.Vector3, weapon: number, size: number) {
-  if (weapon === NO_WEAPON) scale.setScalar(0);
-  else if (weapon === WEAPON_ID.sniper) scale.set(size * 0.8, size * 0.85, size * 1.7);
-  else if (weapon === WEAPON_ID.shotgun) scale.set(size * 1.8, size * 1.25, size * 0.7);
-  else if (weapon === WEAPON_ID.rocket) scale.set(size * 1.6, size * 1.4, size * 1.25);
-  else scale.setScalar(size);
-}
-
 /** The archive owns the poses. These meshes upload only newly retired or still falling bodies. */
 export class CorpseRenderer {
   private readonly scene: THREE.Scene;
@@ -116,6 +109,7 @@ export class CorpseRenderer {
   private readonly shadows: THREE.InstancedMesh;
   private readonly pending = new Map<number, Landing>();
   private readonly dummy = new THREE.Object3D();
+  private readonly pose = new SoldierPose();
   private readonly tilt = new THREE.Quaternion();
   private readonly offset = new THREE.Vector3();
   private cursor = 0;
@@ -186,7 +180,7 @@ export class CorpseRenderer {
   }
 
   private landing(terrain: Terrain, corpse: RetiredCorpse, body: CorpseBodies): Landing {
-    const { x, y, z, radius, yaw, velocityY } = corpse;
+    const { x, y, z, radius, yaw, fallOffset, velocityY } = corpse;
     const groundY = terrain.heightAt(x, z);
     const slopeX = (terrain.heightAt(x + radius, z) - terrain.heightAt(x - radius, z)) / (2 * radius);
     const slopeZ = (terrain.heightAt(x, z + radius) - terrain.heightAt(x, z - radius)) / (2 * radius);
@@ -194,7 +188,8 @@ export class CorpseRenderer {
     const tilt = new THREE.Quaternion().setFromUnitVectors(UP, normal);
     const clearance = radius / normal.y;
     const halfLength = CONFIG.soldier.height / 2 - radius;
-    const end = this.offset.set(Math.sin(yaw) * halfLength, 0, Math.cos(yaw) * halfLength).applyQuaternion(tilt);
+    const heading = yaw + fallOffset;
+    const end = this.offset.set(Math.sin(heading) * halfLength, 0, Math.cos(heading) * halfLength).applyQuaternion(tilt);
     const support = Math.max(groundY, terrain.heightAt(x + end.x, z + end.z) - end.y, terrain.heightAt(x - end.x, z - end.z) + end.y);
     const airHeight = Math.max(0, y - groundY), speed = Math.max(0, -velocityY);
     // Finish the visual descent even in zero-gravity tests and after the simulation stops.
@@ -206,29 +201,24 @@ export class CorpseRenderer {
 
   private setPose(slot: number, landing: Landing, progress: number) {
     const { corpse, body, tilt, startY, restY, groundY, initialSpeed } = landing;
-    const { x, z, yaw, radius, aimPitch, weapon } = corpse;
+    const { x, z, yaw, fallOffset, roll, radius, aimPitch, weapon } = corpse;
     const fall = progress * (progress + initialSpeed * (1 - progress));
     const y = THREE.MathUtils.lerp(startY, restY, fall), size = radius / CONFIG.soldier.radius;
     const dummy = this.dummy, slope = this.tilt.identity().slerp(tilt, fall);
-    dummy.position.set(x, y, z);
-    dummy.rotation.set(Math.PI / 2, yaw, 0, 'YXZ');
-    dummy.quaternion.premultiply(slope);
+    const pose = this.pose;
+    pose.set(x, y, z, yaw, 1, fallOffset, roll);
+    pose.rotation.premultiply(slope);
+    dummy.position.copy(pose.center);
+    dummy.quaternion.copy(pose.rotation);
     dummy.scale.setScalar(1);
     dummy.updateMatrix();
     body.setMatrix(slot, dummy.matrix);
 
-    const sin = Math.sin(yaw), cos = Math.cos(yaw);
-    this.offset.set((sin * 0.34 + cos * 0.20) * size, 0.18 - radius, (cos * 0.34 - sin * 0.20) * size).applyQuaternion(slope);
-    dummy.position.set(x + this.offset.x, y + this.offset.y, z + this.offset.z);
-    dummy.rotation.set(-aimPitch, yaw, Math.PI / 2, 'YXZ');
-    dummy.quaternion.premultiply(slope);
+    pose.gun(dummy, size, aimPitch);
     setGunScale(dummy.scale, weapon, 1);
     this.write(this.guns, slot);
 
-    this.offset.set(sin * 0.907 * radius, 0.17 - radius, cos * 0.907 * radius).applyQuaternion(slope);
-    dummy.position.set(x + this.offset.x, y + this.offset.y, z + this.offset.z);
-    dummy.rotation.set(Math.PI / 2, yaw, 0, 'YXZ');
-    dummy.quaternion.premultiply(slope);
+    pose.visor(dummy, radius);
     dummy.scale.setScalar(1);
     this.write(this.visors, slot);
 

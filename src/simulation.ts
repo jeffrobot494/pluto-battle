@@ -28,6 +28,8 @@ export interface RetiredCorpse {
   readonly z: number;
   readonly velocityY: number;
   readonly yaw: number;
+  readonly fallOffset: number;
+  readonly roll: number;
   readonly aimPitch: number;
   readonly radius: number;
   readonly team: Team;
@@ -216,7 +218,9 @@ export class BattleSimulation {
   readonly lastHit: Float64Array;
   readonly lastFire: Float64Array;
   readonly diedAt: Float64Array;
-  private readonly corpseArchived: Uint8Array;
+  readonly deathFallOffset: Float32Array;
+  readonly deathRoll: Float32Array;
+  readonly pendingCorpse: Uint8Array;
   /** Ring of final physics poses. The renderer can consume several retirements between frames. */
   readonly retiredCorpses: RetiredCorpse[] = [];
   retiredCorpseCount = 0;
@@ -244,6 +248,8 @@ export class BattleSimulation {
   private readonly steeringRng: () => number;
   /** Jitter for decision timing (search cadence, reactions, retries); separate so it never shifts other streams. */
   private readonly aiRng: () => number;
+  private readonly corpseRng: () => number;
+  private retainedDeathInGroup = 0;
   readonly centerX = new Float64Array(2);
   readonly centerZ = new Float64Array(2);
   time = 0;
@@ -305,7 +311,8 @@ export class BattleSimulation {
     this.id = new Uint32Array(capacity); this.target = new Uint32Array(capacity);
     this.facing = new Float32Array(capacity); this.lastHit = new Float64Array(capacity).fill(-Infinity);
     this.lastFire = new Float64Array(capacity).fill(-Infinity); this.diedAt = new Float64Array(capacity).fill(-Infinity);
-    this.corpseArchived = new Uint8Array(capacity);
+    this.deathFallOffset = new Float32Array(capacity); this.deathRoll = new Float32Array(capacity);
+    this.pendingCorpse = new Uint8Array(capacity);
     this.nextFire = new Float64Array(capacity); this.nextSearch = new Float64Array(capacity);
     this.moving = new Uint8Array(capacity); this.pendingDamage = new Float32Array(capacity);
     this.detourSide = new Int8Array(capacity);
@@ -318,6 +325,7 @@ export class BattleSimulation {
     // relationship to unit IDs, team, column parity, or storage order.
     this.steeringRng = random(seed ^ 0x51ed270b);
     this.aiRng = random(seed ^ 0x2c1b3c6d);
+    this.corpseRng = random(seed ^ 0x5e2d58d1);
     if (!Number.isInteger(perTeam) || perTeam < 0 || perTeam * 2 > capacity || perTeam > 500) throw new Error('Supported deployment: 0–500 per team within capacity.');
     const columns = Math.max(1, Math.min(perTeam, this.tuning.columns));
     for (let team = 0; team < 2; team++) for (let n = 0; n < perTeam; n++) {
@@ -456,7 +464,7 @@ export class BattleSimulation {
     this.upgrades[slot] = 0; this.upgradeWeapon[slot] = NO_WEAPON;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
-    this.corpseArchived[slot] = 0;
+    this.pendingCorpse[slot] = 0;
     this.nextFire[slot] = this.time + this.rng() * this.weaponFor(weapon).interval;
     this.nextSearch[slot] = this.time + this.rng() * this.tuning.initialSearchDelay;
     this.grid.insert(slot, x, z); this.alive[team]++;
@@ -566,6 +574,12 @@ export class BattleSimulation {
     this.events.emit(this.hp[i] === 0 ? 'death' : 'hit', this.team[i] as Team, this.x[i], this.time);
     if (this.hp[i] === 0) {
       this.diedAt[i] = this.time; this.target[i] = 0; this.moving[i] = 0;
+      // Pick one casualty from each group before it falls so the fade can start on time.
+      const deathInGroup = this.totalDeaths % CONFIG.corpseRetentionGroup;
+      if (deathInGroup === 0) this.retainedDeathInGroup = Math.floor(this.corpseRng() * CONFIG.corpseRetentionGroup);
+      this.pendingCorpse[i] = Number(deathInGroup === this.retainedDeathInGroup);
+      this.deathFallOffset[i] = (this.corpseRng() * 2 - 1) * Math.PI;
+      this.deathRoll[i] = (this.corpseRng() * 2 - 1) * Math.PI;
       this.grid.remove(i); this.alive[this.team[i]]--; this.totalDeaths++;
     }
   }
@@ -934,12 +948,13 @@ export class BattleSimulation {
   }
 
   private archiveCorpse(i: number) {
-    if (this.corpseArchived[i] || !Number.isFinite(this.diedAt[i])) return;
-    this.corpseArchived[i] = 1;
+    if (!this.pendingCorpse[i]) return;
+    this.pendingCorpse[i] = 0;
     this.retiredCorpses[this.retiredCorpseCount++ % CONFIG.retainedCorpses] = {
       id: this.id[i], at: this.diedAt[i] + CONFIG.corpseLifetime,
       x: this.x[i], y: this.y[i], z: this.z[i], velocityY: this.velocityY[i],
-      yaw: this.facing[i], aimPitch: this.aimPitch[i], radius: this.radius[i],
+      yaw: this.facing[i], fallOffset: this.deathFallOffset[i], roll: this.deathRoll[i],
+      aimPitch: this.aimPitch[i], radius: this.radius[i],
       team: this.team[i] as Team, weapon: this.weapon[i],
     };
   }
