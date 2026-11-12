@@ -467,6 +467,17 @@ test('a wedged truck whose plans give no way out backs out along its trail', () 
   assert.deepEqual(steps.slice(0, 2), ['replan', 'retreat']);
 });
 
+test('two trucks touching at an angle can drive along their length but not deeper into each other', () => {
+  const sim = battle(), f = sim.vehicles, a = crew(sim, 0, 0, 0), b = crew(sim, 0, 6, 0);
+  // Side by side at a slight angle with a little overlap, as a jam leaves them. One disk pair passing
+  // another used to read as a bump in both directions and glued the pair together.
+  parked(sim, a, 0, 0, 0); parked(sim, b, 1.04, 0, 0.15);
+  const move = (dx: number, dz: number) => f.ground.clear(a, 0, 0, 0, dx, dz, 0, 0, 'none');
+  assert.ok(move(0, 0.3), 'forward along the neighbour is clear');
+  assert.ok(move(0, -0.3), 'reverse along the neighbour is clear');
+  assert.ok(!move(0.1, 0), 'pushing sideways into the neighbour is not');
+});
+
 test('two allied trucks meeting nose to nose in a one-lane gap both get through', () => {
   const sim = recoveryWorld([...rockLine(-27, 0, -1.9, 0), ...rockLine(1.9, 0, 27, 0)]), f = sim.vehicles;
   toughEnemy(sim, 0, 16);

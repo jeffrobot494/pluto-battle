@@ -6,11 +6,15 @@ import type { Navigation } from './navigation.ts';
 
 const SAMPLES = 4, STRIDE = 0.28, SHORTLIST = 3, MAX_ROUTES = 26;
 const MAX_DECISIONS = 32;
+/** Seconds of queue age an urgent (blocked) re-plan is worth over a routine one. */
+const URGENT_LEAD = 2;
 const TRAFFIC = 2;
 const DETOUR_ANGLES = [0.50, -0.50, 0.95, -0.95, 1.50, -1.50];
 const RECOVERY_DIRECTIONS = [-1, 1];
 const RECOVERY_STEERING = [0.4, -0.4];
 const RECOVERY_DISTANCE = 0.85;
+const RECOVERY_DISTANCES = [RECOVERY_DISTANCE, 0.3];
+const SHORT_RECOVERY_SPEED = 0.8;
 const RECOVERY_STEPS = Math.ceil(0.7 / CONFIG.step);
 /** Longest field chain a route can follow (cells), whatever the lookahead. */
 const MAX_CHAIN = 64;
@@ -188,8 +192,9 @@ export class TruckTactics {
     for (let n = 0; n < f.count; n++) {
       const v = f.active[n];
       if (f.due[v] > now || !f.urgent[v] && (f.exitLeft[v] > 0 || f.committedUntil[v] > now)) continue;
-      // A short priority boost gets a blocked truck moving. Age eventually outranks urgency.
-      const key = f.urgent[v] ? f.due[v] - 0.4 : Math.max(f.due[v], f.committedUntil[v]);
+      // A priority boost gets a blocked truck moving ahead of routine re-plans (those trucks are still driving),
+      // even when 1,000 trucks keep the queue full. Age eventually outranks urgency.
+      const key = f.urgent[v] ? f.due[v] - URGENT_LEAD : Math.max(f.due[v], f.committedUntil[v]);
       if (size >= cap && key >= this.priority[size - 1]) continue;
       let i = Math.min(size, cap - 1);
       while (i > 0 && key < this.priority[i - 1]) {
@@ -334,8 +339,9 @@ export class TruckTactics {
     const recovery: RecoveryCheck[] | undefined = trace ? [] : undefined;
     const blocker = f.ground.lastBlocker;
     let reverseRock: number | null = null;
-    for (const direction of RECOVERY_DIRECTIONS) {
-      const tx = x + direction * f.sin[v] * RECOVERY_DISTANCE, tz = z + direction * f.cos[v] * RECOVERY_DISTANCE;
+    // In dense traffic a full-length move is often blocked while a short one is clear; take the short one at a crawl.
+    for (const distance of RECOVERY_DISTANCES) for (const direction of RECOVERY_DIRECTIONS) {
+      const tx = x + direction * f.sin[v] * distance, tz = z + direction * f.cos[v] * distance;
       const clear = f.ground.clear(v, x, z, yaw, tx, tz, yaw, 0, 'all', undefined, blocker);
       const reverse = direction < 0;
       if (recovery) recovery.push({
@@ -346,7 +352,7 @@ export class TruckTactics {
         if (reverse) reverseRock = blocker.kind === 'rock' ? blocker.id : null;
         continue;
       }
-      const speed = direction * Math.min(2, reverse ? t.truckReverseSpeed : t.truckSpeed);
+      const speed = direction * Math.min(distance === RECOVERY_DISTANCE ? 2 : SHORT_RECOVERY_SPEED, reverse ? t.truckReverseSpeed : t.truckSpeed);
       this.commit(v, reverse ? Maneuver.Reverse : Maneuver.Escape, yaw, speed);
       if (trace && checks) trace.decision(v, reverse ? 'fallback-reverse' : 'fallback-forward', waiting, this.routeCount, checks, null, recovery, this.routeTrace(v));
       return;

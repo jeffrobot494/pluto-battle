@@ -8,6 +8,7 @@ import { archetypeById } from '../src/terrain-archetypes.ts';
 import { DEFAULT_TUNING, TUNING } from '../src/tuning.ts';
 import { serializeTruckTrace } from '../src/truck-trace-export.ts';
 import { DRIVER, Maneuver } from '../src/vehicle-types.ts';
+import { VehicleBenchmark, benchmarkTuning, liftBenchmarkLimits } from '../src/vehicle-benchmark.ts';
 
 const { values } = parseArgs({
   options: {
@@ -19,6 +20,8 @@ const { values } = parseArgs({
     seconds: { type: 'string', default: '60' },
     // Battlefield area multiplier. Scales width, depth and frontline by its square root, past the Tuning limits.
     area: { type: 'string', default: '1' },
+    // 'trace' (one paint of crewed trucks, --soldiers per army) or a vehicle benchmark workload: packed, sparse, mixed.
+    workload: { type: 'string', default: 'trace' },
     full: { type: 'boolean', default: false },
     quiet: { type: 'boolean', default: false },
     output: { type: 'string', default: 'artifacts/truck-trace.json' },
@@ -33,7 +36,10 @@ function integer(name, min, max, raw = values[name]) {
   return number;
 }
 
-const count = integer('soldiers', 1, 500);
+const workload = values.workload;
+if (!['trace', 'packed', 'sparse', 'mixed'].includes(workload)) throw new Error('--workload must be trace, packed, sparse or mixed.');
+const fixture = workload !== 'trace';
+const count = fixture ? 500 : integer('soldiers', 1, 500);
 const battleSeed = integer('battle-seed', 0, 0xffffffff);
 const terrainSeeds = values['terrain-seed'].split(',').map(raw => integer('terrain-seed', 0, 0xffffffff, raw.trim()));
 const ticks = Math.round(integer('seconds', 1, 600) / CONFIG.step);
@@ -45,10 +51,11 @@ for (const map of maps) if (map !== 'flat' && !archetypeById(map)) throw new Err
 const side = Math.sqrt(area);
 // Lift the battlefield limits for this process only; Tuning keeps its own.
 for (const definition of TUNING) if (definition.key === 'halfWidth' || definition.key === 'halfDepth' || definition.key === 'frontline') definition.max *= side;
-const tuning = {
+const tuning = fixture ? { ...benchmarkTuning({ ...DEFAULT_TUNING, seed: battleSeed }, workload, area), seed: battleSeed } : {
   ...DEFAULT_TUNING, count, seed: battleSeed, columns: Math.ceil(Math.sqrt(count)),
   halfWidth: DEFAULT_TUNING.halfWidth * side, halfDepth: DEFAULT_TUNING.halfDepth * side, frontline: DEFAULT_TUNING.frontline * side,
 };
+if (fixture) liftBenchmarkLimits(area);
 
 function run(map, terrainSeed) {
   let navigationBuildMs = 0;
@@ -68,10 +75,13 @@ function run(map, terrainSeed) {
   sim.updateNavigation = () => { const at = performance.now(); updateNavigation(); navigationMs += performance.now() - at; };
   const f = sim.vehicles;
   f.startTrace();
-  sim.queue({ type: 'deployTrucks', x: 0, z: 0, radius: Math.hypot(tuning.halfWidth, tuning.halfDepth) + 1, teams: 3 });
+  // The benchmark fixture repaints every 25 s and keeps hulls alive, as in the vehicle benchmark capture.
+  const bench = fixture ? new VehicleBenchmark(workload) : null;
+  if (!bench) sim.queue({ type: 'deployTrucks', x: 0, z: 0, radius: Math.hypot(tuning.halfWidth, tuning.halfDepth) + 1, teams: 3 });
   let truckTicks = 0, holdTicks = 0, reverseTicks = 0;
   const startedAt = performance.now();
   while (sim.tick < ticks && sim.result === 'running') {
+    bench?.beforeStep(sim);
     sim.step();
     for (let n = 0; n < f.count; n++) {
       const v = f.active[n];
@@ -146,7 +156,7 @@ if (results.length === 1) {
 } else {
   const sum = key => results.reduce((total, r) => total + r[key], 0);
   const truckMinutes = sum('truckMinutes'), truckTicks = sum('truckTicks'), simulated = sum('simulatedTicks');
-  console.log(`\n${results.length} runs · area ×${area} · ${count} soldiers per army · ${truckMinutes.toFixed(1)} truck-minutes`);
+  console.log(`\n${results.length} runs · ${workload} · area ×${area} · ${count} soldiers per army · ${truckMinutes.toFixed(1)} truck-minutes`);
   console.log(`stops ${sum('stops')} (${(sum('stops') / Math.max(truckMinutes, 1e-9)).toFixed(2)}/truck-min) · stopped at end ${sum('stoppedAtEnd')} · `
     + `hold ${percent(sum('holdTicks'), truckTicks)} · reverse ${percent(sum('reverseTicks'), truckTicks)}`);
   console.log(`planning ${(sum('planningMs') / Math.max(sum('decisions'), 1) * 1000).toFixed(0)} µs/decision, ${(sum('planningMs') / simulated).toFixed(3)} ms/tick · `
@@ -157,7 +167,7 @@ if (results.length === 1) {
     + `truck graph ${(sum('graphBuildMs') / results.length).toFixed(1)} ms mean · stuck ${sum('stuck')} livelock ${sum('livelocks')}`);
   const path = resolve(values.output.replace(/\.json$/, '-summary.json'));
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify({ area, count, seconds: ticks * CONFIG.step, battleSeed, runs: results.map(({ report, ...r }) => r) }, null, 2));
+  await writeFile(path, JSON.stringify({ workload, area, count, seconds: ticks * CONFIG.step, battleSeed, runs: results.map(({ report, ...r }) => r) }, null, 2));
   console.log(path);
 }
 

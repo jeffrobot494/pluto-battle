@@ -12,6 +12,27 @@ const SKIN = 0.002;
  */
 const TOUCH_SOFT = 0.03, TOUCH_BUMP = 0.025, TOUCH_HARD = 0.06;
 const slides = (start: number, deepest: number) => deepest <= TOUCH_SOFT || deepest <= TOUCH_HARD && deepest <= start + TOUCH_BUMP;
+/**
+ * Touching trucks are compared as capsules: the segment through the footprint disks, inflated by the radius. That
+ * overlap is smooth, so trucks pressed side by side can slide apart even where single disk pairs pass a bump.
+ * A move between touching trucks is fine while the capsule overlap never deepens past the start (or TOUCH_SOFT);
+ * past SPINE_DEEP the disk rule alone decides.
+ */
+const SPINE = TRUCK.disks[TRUCK.disks.length - 1], SPINE_DEEP = 0.15, SPINE_SAMPLES = 4;
+function pointToSpine(px: number, pz: number, x: number, z: number, sin: number, cos: number) {
+  const t = Math.max(-SPINE, Math.min(SPINE, (px - x) * sin + (pz - z) * cos));
+  return Math.hypot(px - x - sin * t, pz - z - cos * t);
+}
+/** Distance between two truck spines; 0 when they cross. */
+function spineGap(ax: number, az: number, as: number, ac: number, bx: number, bz: number, bs: number, bc: number) {
+  const a0x = ax - as * SPINE, a0z = az - ac * SPINE, a1x = ax + as * SPINE, a1z = az + ac * SPINE;
+  const b0x = bx - bs * SPINE, b0z = bz - bc * SPINE, b1x = bx + bs * SPINE, b1z = bz + bc * SPINE;
+  const side = (px: number, pz: number, qx: number, qz: number, rx: number, rz: number) => (qx - px) * (rz - pz) - (qz - pz) * (rx - px);
+  if (side(a0x, a0z, a1x, a1z, b0x, b0z) * side(a0x, a0z, a1x, a1z, b1x, b1z) < 0
+    && side(b0x, b0z, b1x, b1z, a0x, a0z) * side(b0x, b0z, b1x, b1z, a1x, a1z) < 0) return 0;
+  return Math.min(pointToSpine(a0x, a0z, bx, bz, bs, bc), pointToSpine(a1x, a1z, bx, bz, bs, bc),
+    pointToSpine(b0x, b0z, ax, az, as, ac), pointToSpine(b1x, b1z, ax, az, as, ac));
+}
 type FootTraffic = 'all' | 'allies' | 'none';
 
 /** Ground physics for the truck. Crew, weapons, and damage belong to the fleet. */
@@ -86,6 +107,7 @@ export class TruckController {
       }
       for (let other = trucks.heads[cell]; other >= 0; other = trucks.next[other]) {
         if (other === v || Math.abs(f.y[other] - y) > TRUCK.hull.top + 0.24) continue;
+        if (this.slidesPast(other, x, z, yaw, tx, tz, tyaw, radius + TRUCK.radius + SKIN, fraction)) continue;
         for (const offset of TRUCK.disks) {
           const dist = this.sweepDisks(f.x[other] + f.sin[other] * offset, f.z[other] + f.cos[other] * offset,
             radius + TRUCK.radius + SKIN, fraction, true);
@@ -99,6 +121,19 @@ export class TruckController {
       }
     }
     return fraction;
+  }
+
+  /** True when the truck starts touching `other` and the move never deepens their capsule overlap (see SPINE). */
+  private slidesPast(other: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number, contact: number, fraction: number) {
+    const f = this.fleet, ox = f.x[other], oz = f.z[other], os = f.sin[other], oc = f.cos[other];
+    const start = contact - spineGap(x, z, Math.sin(yaw), Math.cos(yaw), ox, oz, os, oc);
+    if (start <= 0 || start > SPINE_DEEP) return false;
+    const limit = Math.max(TOUCH_SOFT, start) + 1e-9, turn = angleDelta(tyaw, yaw);
+    for (let k = 1; k <= SPINE_SAMPLES; k++) {
+      const s = fraction * k / SPINE_SAMPLES, a = yaw + turn * s;
+      if (contact - spineGap(x + (tx - x) * s, z + (tz - z) * s, Math.sin(a), Math.cos(a), ox, oz, os, oc) > limit) return false;
+    }
+    return true;
   }
 
   private sweepDisks(x: number, z: number, radius: number, fraction: number, truck = false) {
@@ -146,6 +181,7 @@ export class TruckController {
     for (let row = trucks.row(tz - reach); row <= trucks.row(tz + reach); row++) for (let col = trucks.column(tx - reach); col <= trucks.column(tx + reach); col++) {
       for (let other = trucks.heads[row * trucks.columns + col]; other >= 0; other = trucks.next[other]) {
         if (other === v || Math.abs(f.y[other] - f.y[v]) > TRUCK.hull.top + 0.24) continue;
+        if (this.slidesPast(other, x, z, yaw, tx, tz, tyaw, contact, 1)) continue;
         let end = Infinity, start = Infinity;
         for (const a of TRUCK.disks) for (const b of TRUCK.disks) {
           const ox = f.x[other] + f.sin[other] * b, oz = f.z[other] + f.cos[other] * b;

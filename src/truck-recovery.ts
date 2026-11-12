@@ -45,6 +45,8 @@ export class TruckRecovery {
   private readonly trailZ: Float64Array;
   private readonly trailYaw: Float64Array;
   private readonly retreatWait: Uint8Array;
+  /** The crawl's committed direction (1 forward, -1 back, 0 not chosen), so it doesn't rock against a blocker. */
+  private readonly crawlDirection: Int8Array;
   private readonly restartAt: Float64Array;
   private readonly trailHead: Int32Array;
   private readonly trailLength: Int32Array;
@@ -64,7 +66,7 @@ export class TruckRecovery {
     this.anchorX = new Float64Array(n); this.anchorZ = new Float64Array(n); this.since = new Float64Array(n); this.pickupSince = new Float64Array(n);
     this.stage = new Uint8Array(n); this.stuck = new Uint8Array(n); this.blockerTruck = new Int32Array(n).fill(-1);
     this.trailX = new Float64Array(n * TRAIL_POSES); this.trailZ = new Float64Array(n * TRAIL_POSES); this.trailYaw = new Float64Array(n * TRAIL_POSES);
-    this.retreatWait = new Uint8Array(n); this.restartAt = new Float64Array(n);
+    this.retreatWait = new Uint8Array(n); this.crawlDirection = new Int8Array(n); this.restartAt = new Float64Array(n);
     this.trailHead = new Int32Array(n); this.trailLength = new Int32Array(n); this.retreatLeft = new Float64Array(n);
     this.loopX = new Float64Array(n); this.loopZ = new Float64Array(n); this.loopAt = new Float64Array(n).fill(-Infinity); this.loops = new Uint8Array(n);
     this.nextMakeWay = new Float64Array(n); this.yieldUntil = new Float64Array(n);
@@ -135,7 +137,7 @@ export class TruckRecovery {
       if (this.trailLength[v] > 1) this.startRetreat(v);
     }
     if (stall >= LADDER.crawl && this.stage[v] < STAGE_CRAWL) {
-      this.stage[v] = STAGE_CRAWL; this.restartAt[v] = now + LADDER_RESTART; this.escalate(v, 'crawl'); f.metrics.crawls++;
+      this.stage[v] = STAGE_CRAWL; this.crawlDirection[v] = 0; this.restartAt[v] = now + LADDER_RESTART; this.escalate(v, 'crawl'); f.metrics.crawls++;
     }
     // Nothing moved it, not even the crawl (another truck, or no trail yet): climb the ladder again.
     else if (this.stage[v] === STAGE_CRAWL && now >= this.restartAt[v]) this.stage[v] = 0;
@@ -150,11 +152,15 @@ export class TruckRecovery {
 
   private escalate(v: number, step: Escalation) { this.f.trace?.escalation(v, step, this.stall(v)); }
 
-  /** Two trucks blocking each other: the higher ID backs out along its trail, the other holds briefly. */
+  /**
+   * Two trucks blocking each other: one backs out along its trail, the other holds briefly. The higher ID backs
+   * out, unless its trail is blocked (often by the other truck itself) and the lower ID's isn't.
+   */
   private yieldOrder(v: number) {
     const f = this.f, other = this.blockerTruck[v];
     if (other < 0 || f.hp[other] <= 0 || f.id[other] === 0 || this.stall(other) < LADDER.replan && !this.retreating(other)) { this.makeWay(v); return; }
-    if (f.id[v] > f.id[other]) {
+    const high = f.id[v] > f.id[other] ? v : other, low = high === v ? other : v;
+    if ((this.canRetreat(high) || !this.canRetreat(low) ? high : low) === v) {
       f.metrics.yields++; this.escalate(v, 'yield');
       if (this.trailLength[v] > 1) this.startRetreat(v);
     } else if (!this.retreating(v)) {
@@ -183,6 +189,20 @@ export class TruckRecovery {
       }
     }
     if (pushed) { f.metrics.makeWay += pushed; if (this.stage[v] === STAGE_YIELD && now - this.since[v] < LADDER.yield + MAKE_WAY_PERIOD) this.escalate(v, 'make-way'); }
+  }
+
+  /** Whether a trail retreat could take its first step now. */
+  private canRetreat(v: number) {
+    const f = this.f;
+    let n = this.trailLength[v], k = this.last(v);
+    // Skip the poses the truck is still sitting on, as startRetreat does.
+    while (n > 1 && (f.x[v] - this.trailX[k]) ** 2 + (f.z[v] - this.trailZ[k]) ** 2 < (TRAIL_SPACING * 0.7) ** 2) {
+      n--; k = v * TRAIL_POSES + (k - v * TRAIL_POSES + TRAIL_POSES - 1) % TRAIL_POSES;
+    }
+    if (n <= 1) return false;
+    const x = f.x[v], z = f.z[v], yaw = f.yaw[v], dx = this.trailX[k] - x, dz = this.trailZ[k] - z;
+    const t = Math.min(1, RETREAT_SPEED * CONFIG.step / Math.max(Math.hypot(dx, dz), 1e-9));
+    return f.ground.trucksClear(v, x, z, yaw, x + dx * t, z + dz * t, yaw + angleDelta(this.trailYaw[k], yaw) * t);
   }
 
   private startRetreat(v: number) {
@@ -256,10 +276,13 @@ export class TruckRecovery {
    */
   private crawl(v: number) {
     const f = this.f, sim = f.sim, step = CRAWL_SPEED * CONFIG.step, x = f.x[v], z = f.z[v], yaw = f.yaw[v];
-    const first = f.desiredSpeed[v] < 0 ? -1 : 1;
+    // Keep going the way the ladder already moved it (a retreat), or the way the driver wanted to go.
+    const along = (x - this.anchorX[v]) * Math.sin(yaw) + (z - this.anchorZ[v]) * Math.cos(yaw);
+    const first = this.crawlDirection[v] || (Math.abs(along) > 0.05 ? Math.sign(along) : f.desiredSpeed[v] < 0 ? -1 : 1);
     for (const direction of [first, -first]) {
       const tx = x + Math.sin(yaw) * step * direction, tz = z + Math.cos(yaw) * step * direction;
       if (!f.ground.clear(v, x, z, yaw, tx, tz, yaw, 0, 'none')) continue;
+      this.crawlDirection[v] = direction;
       f.setPose(v, tx, tz, yaw); f.vx[v] = f.vz[v] = 0;
       this.displace(v);
       return true;
