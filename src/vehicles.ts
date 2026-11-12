@@ -135,6 +135,11 @@ export class VehicleFleet {
     contactChecks: 0, contacts: 0, rams: 0, firingMs: 0, shots: 0, destructions: 0, peakTrucks: 0,
     /** Recovery: trucks that stalled past the stuck bound, ladder loops at one spot, and each ladder step taken. */
     stuck: 0, livelocks: 0, yields: 0, retreats: 0, crawls: 0, makeWay: 0, displaced: 0, placementIsolated: 0,
+    /** Routing: plans that read the truck field, how they aimed, and why the rest fell back to straight lines. */
+    routeQueries: 0, routeUsed: 0, routeStraight: 0,
+    fallbackDisabled: 0, fallbackNoGraph: 0, fallbackNotReady: 0, fallbackUnknownCell: 0,
+    /** Truck graph and fields: graph builds and their time, field expansions (total and the busiest tick), and how field builds ended. */
+    graphBuilds: 0, graphBuildMs: 0, fieldExpansions: 0, peakFieldExpansions: 0, fieldEarlyStops: 0, fieldFullSweeps: 0,
   };
 
   readonly sim: BattleSimulation;
@@ -176,8 +181,10 @@ export class VehicleFleet {
   /** Advances the truck graph build a budgeted slice (a live `truckSlope` change starts a rebuild), then the truck fields. */
   updateNavigation() {
     if (!this.truckGraph) return;
-    this.truckGraph.update(this.sim.tuning.truckSlope);
-    this.truckFields.update(this.truckGraph.navigation);
+    const graph = this.truckGraph, m = this.metrics, builds = graph.builds;
+    graph.update(this.sim.tuning.truckSlope);
+    if (graph.builds !== builds) { m.graphBuilds++; m.graphBuildMs += graph.navigation!.buildMs; }
+    this.truckFields.update(graph.navigation);
   }
   get pendingCrews() { return this.placement.length - this.placementHead; }
   get pendingDestructions() { return this.wrecks.length - this.wreckHead; }

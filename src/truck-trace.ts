@@ -2,6 +2,7 @@ import { CONFIG } from './config.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, type TruckBlocker } from './vehicle-types.ts';
 import type { VehicleFleet } from './vehicles.ts';
 import type { Escalation } from './truck-recovery.ts';
+import { ROUTE_STATES } from './truck-tactics.ts';
 
 const STATIONARY_TICKS = Math.round(2 / CONFIG.step);
 const STATIONARY_RADIUS = 0.25;
@@ -87,6 +88,9 @@ interface TruckHistory {
   anchorX: number;
   anchorZ: number;
   stopCount: number;
+  /** Stops by how the last plan aimed: with a working truck field (route or a clear straight line) or as a fallback. */
+  routedStops: number;
+  fallbackStops: number;
   lastStop: Stop | null;
   droppedEvents: number;
   events: TraceEvent[];
@@ -126,7 +130,7 @@ export class TruckTrace {
     const history: TruckHistory = {
       id, activity: null, driver: null, gunner: null, passenger: null,
       anchorTick: f.sim.tick, anchorX: f.x[v], anchorZ: f.z[v],
-      stopCount: 0, lastStop: null, droppedEvents: 0, events: [], retired: null,
+      stopCount: 0, routedStops: 0, fallbackStops: 0, lastStop: null, droppedEvents: 0, events: [], retired: null,
     };
     this.histories.set(id, history);
     return history;
@@ -207,6 +211,8 @@ export class TruckTrace {
     } else if (tick - history.anchorTick >= STATIONARY_TICKS && (!history.lastStop || history.lastStop.endedTick !== null)) {
       history.stopCount++;
       this.stopped++;
+      const route = ROUTE_STATES[f.tactics.routeState[v]];
+      if (route === 'route' || route === 'straight') history.routedStops++; else history.fallbackStops++;
       history.lastStop = {
         sinceTick: history.anchorTick, detectedTick: tick, endedTick: null, endedBy: null,
         x: f.x[v], z: f.z[v], activity, preceding: history.events.slice(-EVENTS_BEFORE_STOP).map(event => ({ ...event })),
@@ -265,7 +271,7 @@ export class TruckTrace {
       const slot = f.byId.get(history.id);
       return {
         id: history.id, active: slot !== undefined, snapshot: slot === undefined ? history.retired : this.snapshot(slot),
-        stopCount: history.stopCount, lastStop: history.lastStop, droppedEvents: history.droppedEvents, events: history.events,
+        stopCount: history.stopCount, routedStops: history.routedStops, fallbackStops: history.fallbackStops, lastStop: history.lastStop, droppedEvents: history.droppedEvents, events: history.events,
       };
     });
     const stuckTruckIds = Array.from({ length: f.count }, (_, n) => f.active[n]).filter(v => f.recovery.stuck[v]).map(v => f.id[v]).sort((a, b) => a - b);
@@ -279,6 +285,12 @@ export class TruckTrace {
       stationary: { ticks: STATIONARY_TICKS, radius: STATIONARY_RADIUS },
       recentEventLimit: RECENT_EVENTS, evictedTrucks: this.evicted, stoppedTruckIds, stuckTruckIds,
       recovery: { stuck: f.metrics.stuck, livelocks: f.metrics.livelocks, yields: f.metrics.yields, retreats: f.metrics.retreats, crawls: f.metrics.crawls, makeWay: f.metrics.makeWay, displaced: f.metrics.displaced },
+      routing: {
+        queries: f.metrics.routeQueries, route: f.metrics.routeUsed, straight: f.metrics.routeStraight,
+        fallbacks: { disabled: f.metrics.fallbackDisabled, 'no-graph': f.metrics.fallbackNoGraph, 'not-ready': f.metrics.fallbackNotReady, 'unknown-cell': f.metrics.fallbackUnknownCell },
+        graphBuilds: f.metrics.graphBuilds, graphBuildMs: f.metrics.graphBuildMs, fieldExpansions: f.metrics.fieldExpansions, peakFieldExpansions: f.metrics.peakFieldExpansions,
+        fieldEarlyStops: f.metrics.fieldEarlyStops, fieldFullSweeps: f.metrics.fieldFullSweeps,
+      },
       trucks,
     });
   }

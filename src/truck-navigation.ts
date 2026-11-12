@@ -115,7 +115,15 @@ export class TruckFields {
         this.builds[team]++;
       }
     }
-    if (navigation.fields[0].building || navigation.fields[1].building) navigation.advance(TRUCK_FIELD_BUDGET);
-    else navigation.expansions = 0;
+    const [a, b] = navigation.fields;
+    if (!a.building && !b.building) { navigation.expansions = 0; return; }
+    const wasBuilding = [a.building, b.building];
+    navigation.advance(TRUCK_FIELD_BUDGET);
+    const m = fleet.metrics;
+    m.fieldExpansions += navigation.expansions; m.peakFieldExpansions = Math.max(m.peakFieldExpansions, navigation.expansions);
+    for (let team = 0; team < 2; team++) {
+      const f = navigation.fields[team];
+      if (wasBuilding[team] && !f.building) { if (f.complete) m.fieldFullSweeps++; else m.fieldEarlyStops++; }
+    }
   }
 }

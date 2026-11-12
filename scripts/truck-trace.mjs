@@ -84,7 +84,14 @@ function run(map, terrainSeed) {
   const wallMs = performance.now() - startedAt;
   const report = f.stopTrace();
   const stops = report.trucks.reduce((sum, truck) => sum + truck.stopCount, 0);
+  const routedStops = report.trucks.reduce((sum, truck) => sum + truck.routedStops, 0);
+  const fallbackStops = report.trucks.reduce((sum, truck) => sum + truck.fallbackStops, 0);
+  const routing = report.routing;
   return {
+    routedStops, fallbackStops, stuck: report.recovery.stuck, livelocks: report.recovery.livelocks,
+    routeQueries: routing.queries, routeUsed: routing.route, routeFallbacks: Object.values(routing.fallbacks).reduce((a, b) => a + b, 0),
+    fallbacks: routing.fallbacks, fieldExpansions: routing.fieldExpansions, peakFieldExpansions: routing.peakFieldExpansions,
+    fieldEarlyStops: routing.fieldEarlyStops, fieldFullSweeps: routing.fieldFullSweeps, graphBuildMs: routing.graphBuildMs,
     map: report.map, terrainSeed, report, stops, stoppedAtEnd: report.stoppedTruckIds.length,
     truckMinutes: truckTicks * CONFIG.step / 60, holdTicks, reverseTicks, truckTicks,
     planningMs: f.metrics.planningMs, decisions: f.metrics.decisions, navigationMs, simulatedTicks: sim.tick,
@@ -115,7 +122,12 @@ function line(r) {
     + `${r.stops} stops (${(r.stops / Math.max(r.truckMinutes, 1e-9)).toFixed(2)}/truck-min) · ${r.stoppedAtEnd} stopped at end · `
     + `hold ${percent(r.holdTicks, r.truckTicks)} reverse ${percent(r.reverseTicks, r.truckTicks)} · `
     + `plan ${r.planningMs.toFixed(0)} ms (${(r.planningMs / Math.max(r.decisions, 1) * 1000).toFixed(0)} µs/decision) · `
-    + `nav build ${r.navigationBuildMs.toFixed(1)} ms, ${(r.navigationMs / Math.max(r.simulatedTicks, 1)).toFixed(3)} ms/tick`;
+    + `nav build ${r.navigationBuildMs.toFixed(1)} ms, ${(r.navigationMs / Math.max(r.simulatedTicks, 1)).toFixed(3)} ms/tick`
+    + `
+    stops routed ${r.routedStops} fallback ${r.fallbackStops} · route ${percent(r.routeUsed, r.routeQueries)} of ${r.routeQueries} plans, fallback ${percent(r.routeFallbacks, r.routeQueries)} `
+    + `(${Object.entries(r.fallbacks).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ') || 'none'}) · `
+    + `truck graph ${r.graphBuildMs.toFixed(1)} ms · fields ${(r.fieldExpansions / Math.max(r.simulatedTicks, 1)).toFixed(1)} exp/tick, peak ${r.peakFieldExpansions}, `
+    + `${r.fieldEarlyStops} early stops, ${r.fieldFullSweeps} full sweeps · stuck ${r.stuck} livelock ${r.livelocks}`;
 }
 
 const results = [];
@@ -140,8 +152,19 @@ if (results.length === 1) {
   console.log(`planning ${(sum('planningMs') / Math.max(sum('decisions'), 1) * 1000).toFixed(0)} µs/decision, ${(sum('planningMs') / simulated).toFixed(3)} ms/tick · `
     + `nav build ${(sum('navigationBuildMs') / results.length).toFixed(1)} ms mean, ${Math.max(...results.map(r => r.navigationBuildMs)).toFixed(1)} ms max · `
     + `nav ${(sum('navigationMs') / simulated).toFixed(3)} ms/tick · ${Math.round(sum('cells') / results.length)} cells mean`);
+  console.log(`stops routed ${sum('routedStops')} fallback ${sum('fallbackStops')} · route ${percent(sum('routeUsed'), sum('routeQueries'))} of plans, fallback ${percent(sum('routeFallbacks'), sum('routeQueries'))} · `
+    + `fields ${(sum('fieldExpansions') / simulated).toFixed(1)} exp/tick, peak ${Math.max(...results.map(r => r.peakFieldExpansions))}, ${sum('fieldEarlyStops')} early stops, ${sum('fieldFullSweeps')} full sweeps · `
+    + `truck graph ${(sum('graphBuildMs') / results.length).toFixed(1)} ms mean · stuck ${sum('stuck')} livelock ${sum('livelocks')}`);
   const path = resolve(values.output.replace(/\.json$/, '-summary.json'));
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify({ area, count, seconds: ticks * CONFIG.step, battleSeed, runs: results.map(({ report, ...r }) => r) }, null, 2));
   console.log(path);
+}
+
+// Hard gate: any stuck truck or livelock fails the run (see truck-pathfinding-plan.md, "Zero stuck trucks").
+const failing = results.filter(r => r.stuck || r.livelocks);
+if (failing.length) {
+  console.error(`
+FAIL: stuck trucks in ${failing.length} run(s): ${failing.map(r => `${r.map} #${r.terrainSeed} (stuck ${r.stuck}, livelock ${r.livelocks})`).join(', ')}`);
+  process.exitCode = 1;
 }

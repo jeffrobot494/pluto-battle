@@ -133,3 +133,28 @@ test('a truck can steer in reverse when the same rock blocks both straight recov
   assert.ok(Math.hypot(truck.snapshot.x - contact.x, truck.snapshot.z - contact.z) > 0.85);
   assert.equal(truck.events.some(event => event.kind === 'contact' && event.tick > decision.tick), false);
 });
+
+test('the trace totals routing work: plans by route state, truck graph builds and field sweeps', () => {
+  const terrain = new Terrain(20, 20, 0, [{ x: 0, z: 6, radius: 1.5, base: 0, height: 3, angle: 0 }]);
+  terrain.rebuild();
+  const { sim, fleet, truck } = fixture(terrain);
+  // A tough enemy keeps the battle running after the truck reaches it.
+  for (let i = 0; i < sim.used; i++) if (sim.team[i] === 1) sim.hp[i] = 1e6;
+  const trace = fleet.startTrace();
+  step(sim, 240);
+  const { routing } = trace.report(), m = fleet.metrics;
+  assert.equal(routing.graphBuilds, 1);
+  assert.ok(routing.graphBuildMs > 0);
+  assert.ok(routing.queries > 0);
+  // Every plan is counted exactly once: aimed along the field, straight, or a fallback.
+  const fallbacks = Object.values(routing.fallbacks).reduce((a, b) => a + b, 0);
+  assert.equal(routing.route + routing.straight + fallbacks, routing.queries);
+  assert.ok(routing.route + routing.straight > 0);
+  assert.ok(routing.fieldFullSweeps + routing.fieldEarlyStops > 0);
+  assert.ok(routing.peakFieldExpansions <= 512 && routing.fieldExpansions >= routing.peakFieldExpansions);
+  sim.tuning.truckPathing = 0;
+  const before = m.fallbackDisabled;
+  fleet.due[truck] = fleet.committedUntil[truck] = 0;
+  step(sim, 2);
+  assert.ok(m.fallbackDisabled > before);
+});

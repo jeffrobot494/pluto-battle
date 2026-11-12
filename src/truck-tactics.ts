@@ -282,6 +282,12 @@ export class TruckTactics {
       if (i >= 0 && t.truckRamAggression > 0 && distance < t.truckSpeed * 1.4 + 2) this.add(v, Maneuver.Ram, toward, t.truckSpeed, i);
     }
     this.routeState[v] = fallback || (this.routeUsed ? ROUTED : STRAIGHT);
+    const m = f.metrics; m.routeQueries++;
+    if (fallback === DISABLED) m.fallbackDisabled++;
+    else if (fallback === NO_GRAPH) m.fallbackNoGraph++;
+    else if (fallback === NOT_READY) m.fallbackNotReady++;
+    else if (fallback === UNKNOWN_CELL) m.fallbackUnknownCell++;
+    else if (this.routeUsed) m.routeUsed++; else m.routeStraight++;
     const toward = this.groups[0] < 0 ? Math.atan2(sim.centerX[enemy] - x, sim.centerZ[enemy] - z)
       : Math.atan2(sim.x[this.groups[0]] - x, sim.z[this.groups[0]] - z);
     // Recovery searches toward the gap the route leads to, not toward the enemy behind the wall.
