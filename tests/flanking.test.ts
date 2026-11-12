@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BattleSimulation } from '../src/simulation.ts';
-import { CONFIG } from '../src/config.ts';
+import { CONFIG, WEAPON_ID } from '../src/config.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
 import { prepareTerrain } from '../src/navigation.ts';
+import { Terrain } from '../src/terrain.ts';
 
 /** Worst count, sampled each second from 4–10 s, of soldiers out of range that have not moved for 2 s. */
 function worstPile(sim: BattleSimulation) {
@@ -38,6 +39,33 @@ test('flanking also clears piles on terrain', () => {
   const sim = new BattleSimulation(100, CONFIG.seed, CONFIG.capacity, tuning, prepared.terrain, prepared.navigation);
   const worst = worstPile(sim);
   assert.ok(worst <= 5, `${worst} soldiers stayed pinned out of range`);
+});
+
+test('a soldier pinned against a cliff advances when its ally clears the route', () => {
+  const terrain = new Terrain(3.8, 8, 0, [], [], 0.7);
+  for (let row = 0; row <= terrain.rows; row++) {
+    const z = row * terrain.dz - terrain.halfDepth;
+    for (let column = 0; column <= terrain.columns; column++) {
+      const x = column * terrain.dx - terrain.halfWidth;
+      // A one-soldier-wide corridor with a cliff at its back and an opening toward the enemy.
+      if (z < -0.4 || (z < 2.5 && Math.abs(x) > 0.4)) terrain.heights[row * (terrain.columns + 1) + column] = 3;
+    }
+  }
+  terrain.rebuild();
+
+  const tuning = { ...DEFAULT_TUNING, halfWidth: terrain.halfWidth, halfDepth: terrain.halfDepth, range: 2, initialSearchDelay: 0 };
+  const sim = new BattleSimulation(0, 7, 16, tuning, terrain);
+  const rear = sim.spawn(0, 0, -0.05);
+  const ally = sim.spawn(0, 0, 0.55, WEAPON_ID.heavy);
+  assert.ok(rear && ally && sim.spawn(1, 0, 4.4, WEAPON_ID.heavy));
+  const slot = sim.byId.get(rear)!;
+
+  for (let tick = 0; tick < 80; tick++) sim.step();
+  assert.ok(sim.z[slot] < 0.1, 'the ally should hold the corridor long enough to trigger recovery');
+  sim.damage(ally, tuning.health);
+
+  for (let tick = 0; tick < 60; tick++) sim.step();
+  assert.ok(sim.z[slot] > 1, `soldier stayed at the cliff after the route cleared (z = ${sim.z[slot]})`);
 });
 
 test('soldiers with a clear path never flank', () => {

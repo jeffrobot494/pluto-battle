@@ -880,12 +880,18 @@ export class BattleSimulation {
         }
       }
     }
-    // Boxed in or repeatedly re-blocked: step back and to one side to open space, then try again.
+    // Only commit to a retreat the soldier can reach. A cliff behind it may leave the route ahead as its only exit.
+    const backX = this.x[i] - fx * 1.5, backZ = this.z[i] - fz * 1.5;
     const side = this.detourSide[i];
-    let wx = this.x[i] - fx * 1.5 + lx * side * 0.75, wz = this.z[i] - fz * 1.5 + lz * side * 0.75;
-    if (!this.flankReachable(i, wx, wz)) { wx = this.x[i] - fx * 1.5; wz = this.z[i] - fz * 1.5; }
-    this.flankX[i] = wx; this.flankZ[i] = wz; this.flankState[i] = 2; this.flankTries[i] = 0;
-    this.flankUntil[i] = this.time + 1;
+    this.flankTries[i] = 0;
+    for (const offset of [side * 0.75, 0, -side * 0.75]) {
+      const wx = backX + lx * offset, wz = backZ + lz * offset;
+      if (!this.flankReachable(i, wx, wz)) continue;
+      this.flankX[i] = wx; this.flankZ[i] = wz; this.flankState[i] = 2;
+      this.flankUntil[i] = this.time + 1;
+      return;
+    }
+    this.flankState[i] = 0;
   }
 
   private updateNavigation() {
