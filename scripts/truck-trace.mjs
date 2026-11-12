@@ -22,6 +22,8 @@ const { values } = parseArgs({
     area: { type: 'string', default: '1' },
     // 'trace' (one paint of crewed trucks, --soldiers per army) or a vehicle benchmark workload: packed, sparse, mixed.
     workload: { type: 'string', default: 'trace' },
+    // 'off' sets truckPathing to 0 (the straight-line planner) for A/B checks. The truck graph and fields still build.
+    pathing: { type: 'string', default: 'on' },
     full: { type: 'boolean', default: false },
     quiet: { type: 'boolean', default: false },
     output: { type: 'string', default: 'artifacts/truck-trace.json' },
@@ -56,6 +58,8 @@ const tuning = fixture ? { ...benchmarkTuning({ ...DEFAULT_TUNING, seed: battleS
   halfWidth: DEFAULT_TUNING.halfWidth * side, halfDepth: DEFAULT_TUNING.halfDepth * side, frontline: DEFAULT_TUNING.frontline * side,
 };
 if (fixture) liftBenchmarkLimits(area);
+if (values.pathing !== 'on' && values.pathing !== 'off') throw new Error('--pathing must be on or off.');
+tuning.truckPathing = values.pathing === 'on' ? 1 : 0;
 
 function run(map, terrainSeed) {
   let navigationBuildMs = 0;
@@ -74,6 +78,13 @@ function run(map, terrainSeed) {
   const updateNavigation = sim.updateNavigation.bind(sim);
   sim.updateNavigation = () => { const at = performance.now(); updateNavigation(); navigationMs += performance.now() - at; };
   const f = sim.vehicles;
+  // Truck graph slices and truck fields, timed apart from the infantry fields above.
+  let truckNavigationMs = 0, peakTruckNavigationMs = 0, peakStepMs = 0;
+  const updateTruckNavigation = f.updateNavigation.bind(f);
+  f.updateNavigation = () => {
+    const at = performance.now(); updateTruckNavigation();
+    const ms = performance.now() - at; truckNavigationMs += ms; peakTruckNavigationMs = Math.max(peakTruckNavigationMs, ms);
+  };
   f.startTrace();
   // The benchmark fixture repaints every 25 s and keeps hulls alive, as in the vehicle benchmark capture.
   const bench = fixture ? new VehicleBenchmark(workload) : null;
@@ -82,7 +93,10 @@ function run(map, terrainSeed) {
   const startedAt = performance.now();
   while (sim.tick < ticks && sim.result === 'running') {
     bench?.beforeStep(sim);
+    const stepAt = performance.now();
     sim.step();
+    // Skip the first second: one-off warm-up (JIT, first deployment) is not a stall.
+    if (sim.tick > 1 / CONFIG.step) peakStepMs = Math.max(peakStepMs, performance.now() - stepAt);
     for (let n = 0; n < f.count; n++) {
       const v = f.active[n];
       if (f.seat(v, DRIVER) < 0) continue;
@@ -106,6 +120,9 @@ function run(map, terrainSeed) {
     truckMinutes: truckTicks * CONFIG.step / 60, holdTicks, reverseTicks, truckTicks,
     planningMs: f.metrics.planningMs, decisions: f.metrics.decisions, navigationMs, simulatedTicks: sim.tick,
     navigationBuildMs, preparedMs, wallMs, cells: world ? world.navigation.walkable.length : 0,
+    truckNavigationMs, peakTruckNavigationMs, peakStepMs,
+    contacts: f.metrics.contacts, rams: f.metrics.rams, shots: f.metrics.shots, wrecks: f.metrics.destructions, peakTrucks: f.metrics.peakTrucks,
+    yields: f.metrics.yields, retreats: f.metrics.retreats, crawls: f.metrics.crawls, makeWay: f.metrics.makeWay, displaced: f.metrics.displaced,
   };
 }
 
@@ -165,9 +182,12 @@ if (results.length === 1) {
   console.log(`stops routed ${sum('routedStops')} fallback ${sum('fallbackStops')} · route ${percent(sum('routeUsed'), sum('routeQueries'))} of plans, fallback ${percent(sum('routeFallbacks'), sum('routeQueries'))} · `
     + `fields ${(sum('fieldExpansions') / simulated).toFixed(1)} exp/tick, peak ${Math.max(...results.map(r => r.peakFieldExpansions))}, ${sum('fieldEarlyStops')} early stops, ${sum('fieldFullSweeps')} full sweeps · `
     + `truck graph ${(sum('graphBuildMs') / results.length).toFixed(1)} ms mean · stuck ${sum('stuck')} livelock ${sum('livelocks')}`);
+  console.log(`truck nav ${(sum('truckNavigationMs') / simulated).toFixed(3)} ms/tick, peak ${Math.max(...results.map(r => r.peakTruckNavigationMs)).toFixed(1)} ms · `
+    + `peak step ${Math.max(...results.map(r => r.peakStepMs)).toFixed(1)} ms · contacts ${sum('contacts')} rams ${sum('rams')} shots ${sum('shots')} wrecks ${sum('wrecks')} · `
+    + `ladder: yields ${sum('yields')} retreats ${sum('retreats')} crawls ${sum('crawls')} make-way ${sum('makeWay')} displaced ${sum('displaced')}`);
   const path = resolve(values.output.replace(/\.json$/, '-summary.json'));
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify({ workload, area, count, seconds: ticks * CONFIG.step, battleSeed, runs: results.map(({ report, ...r }) => r) }, null, 2));
+  await writeFile(path, JSON.stringify({ workload, area, pathing: values.pathing, count, seconds: ticks * CONFIG.step, battleSeed, runs: results.map(({ report, ...r }) => r) }, null, 2));
   console.log(path);
 }
 

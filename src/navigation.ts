@@ -322,6 +322,26 @@ export class Navigation {
     return -1;
   }
   /**
+   * `nodeAt` without the profile's snap test: the cell under (x, z) if walkable, else the nearest walkable cell
+   * within 3 rings. For field goals, which only mark where an enemy is, the clearance test buys nothing and
+   * costs one `snap` per cell checked (a full `driveClear` for trucks).
+   */
+  goalAt(x: number, z: number) {
+    const node = this.terrain.cell(x, z);
+    if (this.walkable[node]) return node;
+    const columns = this.terrain.columns, c = node % columns, r = Math.floor(node / columns);
+    for (let ring = 1; ring <= 3; ring++) {
+      let best = -1, bestD = Infinity;
+      for (let rz = Math.max(0, r - ring); rz <= Math.min(this.terrain.rows - 1, r + ring); rz++) for (let cx = Math.max(0, c - ring); cx <= Math.min(columns - 1, c + ring); cx++) {
+        const n = rz * columns + cx; if (!this.walkable[n]) continue;
+        const d = (this.x(n) - x) ** 2 + (this.z(n) - z) ** 2;
+        if (d < bestD) { bestD = d; best = n; }
+      }
+      if (best >= 0) return best;
+    }
+    return -1;
+  }
+  /**
    * Starts an incremental rebuild toward `goals`. Optional `occupants` (cells of the team that will follow
    * this field) add a congestion cost so overflow spreads onto alternate routes instead of piling into one lane.
    * A positive `fireRange` also seeds cells that have a shot at the goals, so the field leads to vantage

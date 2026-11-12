@@ -86,28 +86,31 @@ export class TruckFields {
     if (!navigation) return;
     const fleet = this.fleet, sim = fleet.sim, fresh = navigation !== this.navigation;
     this.navigation = navigation;
-    // Crewed trucks per team; their cells are where the field must be known.
-    this.watchCount[0] = this.watchCount[1] = 0;
-    for (let k = 0; k < fleet.count; k++) {
-      const v = fleet.active[k], team = fleet.team[v];
-      if (fleet.hp[v] <= 0 || fleet.seat(v, DRIVER_SEAT) < 0) continue;
-      this.watch[team][this.watchCount[team]++] = navigation.nodeAt(fleet.x[v], fleet.z[v]);
-    }
     const restart = (team: number) => {
       const f = navigation.fields[team];
-      if (!this.watchCount[team] || f.building) return false;
-      return fresh || !f.ready || sim.tick % TRUCK_FIELD_PERIOD === 0;
+      return !f.building && (fresh || !f.ready || sim.tick % TRUCK_FIELD_PERIOD === 0);
     };
     const due = [restart(0), restart(1)];
+    if (due[0] || due[1]) {
+      // Crewed trucks per team; their cells are where the field must be known. A team with none skips its field.
+      // Snapped only on a restart: stopWhenSettled reads them once, and nodeAt is a driveClear per cell tried.
+      this.watchCount[0] = this.watchCount[1] = 0;
+      for (let k = 0; k < fleet.count; k++) {
+        const v = fleet.active[k], team = fleet.team[v];
+        if (!due[team] || fleet.hp[v] <= 0 || fleet.seat(v, DRIVER_SEAT) < 0) continue;
+        this.watch[team][this.watchCount[team]++] = navigation.nodeAt(fleet.x[v], fleet.z[v]);
+      }
+      for (let team = 0; team < 2; team++) if (!this.watchCount[team]) due[team] = false;
+    }
     if (due[0] || due[1]) {
       this.goalCount[0] = this.goalCount[1] = 0;
       for (let i = 0; i < sim.used; i++) if (sim.hp[i] > 0 && fleet.ride[i] < 0) {
         const team = 1 - sim.team[i]; if (!due[team]) continue;
-        this.goals[team][this.goalCount[team]++] = navigation.nodeAt(sim.x[i], sim.z[i]);
+        this.goals[team][this.goalCount[team]++] = navigation.goalAt(sim.x[i], sim.z[i]);
       }
       for (let k = 0; k < fleet.count; k++) {
         const v = fleet.active[k], team = 1 - fleet.team[v];
-        if (due[team] && fleet.hp[v] > 0) this.goals[team][this.goalCount[team]++] = navigation.nodeAt(fleet.x[v], fleet.z[v]);
+        if (due[team] && fleet.hp[v] > 0) this.goals[team][this.goalCount[team]++] = navigation.goalAt(fleet.x[v], fleet.z[v]);
       }
       const range = fleet.range ?? 0, margin = sim.tuning.truckRouteLookahead + TRUCK_FIELD_MARGIN;
       for (let team = 0; team < 2; team++) if (due[team] && navigation.beginField(team, this.goals[team], this.goalCount[team], undefined, 0, 0, range)) {
