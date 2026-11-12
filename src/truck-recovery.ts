@@ -1,5 +1,5 @@
 import { CONFIG } from './config.ts';
-import { DRIVER, Maneuver, TRUCK } from './vehicle-types.ts';
+import { DRIVER, Maneuver, TRUCK, angleDelta } from './vehicle-types.ts';
 import type { VehicleFleet } from './vehicles.ts';
 
 /** Progress that resets the stall clock, and the stall that counts as stuck (the trace's stationary rule). */
@@ -13,6 +13,10 @@ export const TRAIL_SPACING = 0.5;
 /** Longest trail retreat before re-planning. */
 export const RETREAT_DISTANCE = 3;
 const RETREAT_SPEED = 2, YIELD_HOLD = 0.5, CRAWL_SPEED = 0.9;
+/** Ticks a trail retreat waits behind another truck before giving up and re-planning. */
+const RETREAT_WAIT = 12;
+/** A ladder that ran out at the crawl step (nothing moved) starts over this long after the crawl. */
+const LADDER_RESTART = 1;
 /** Re-entering the ladder this close to the last escalation spot, this often within LOOP_WINDOW, is a livelock. */
 const LOOP_RADIUS = 1, LOOP_WINDOW = 15, LOOP_COUNT = 3;
 const MAKE_WAY_LENGTH = 2.6, MAKE_WAY_PUSH = 1.4, MAKE_WAY_PERIOD = 0.1;
@@ -39,6 +43,9 @@ export class TruckRecovery {
   readonly blockerTruck: Int32Array;
   private readonly trailX: Float64Array;
   private readonly trailZ: Float64Array;
+  private readonly trailYaw: Float64Array;
+  private readonly retreatWait: Uint8Array;
+  private readonly restartAt: Float64Array;
   private readonly trailHead: Int32Array;
   private readonly trailLength: Int32Array;
   /** Distance a trail retreat may still cover; positive while one is running. */
@@ -56,7 +63,8 @@ export class TruckRecovery {
     const n = f.active.length;
     this.anchorX = new Float64Array(n); this.anchorZ = new Float64Array(n); this.since = new Float64Array(n); this.pickupSince = new Float64Array(n);
     this.stage = new Uint8Array(n); this.stuck = new Uint8Array(n); this.blockerTruck = new Int32Array(n).fill(-1);
-    this.trailX = new Float64Array(n * TRAIL_POSES); this.trailZ = new Float64Array(n * TRAIL_POSES);
+    this.trailX = new Float64Array(n * TRAIL_POSES); this.trailZ = new Float64Array(n * TRAIL_POSES); this.trailYaw = new Float64Array(n * TRAIL_POSES);
+    this.retreatWait = new Uint8Array(n); this.restartAt = new Float64Array(n);
     this.trailHead = new Int32Array(n); this.trailLength = new Int32Array(n); this.retreatLeft = new Float64Array(n);
     this.loopX = new Float64Array(n); this.loopZ = new Float64Array(n); this.loopAt = new Float64Array(n).fill(-Infinity); this.loops = new Uint8Array(n);
     this.nextMakeWay = new Float64Array(n); this.yieldUntil = new Float64Array(n);
@@ -78,7 +86,7 @@ export class TruckRecovery {
 
   private record(v: number) {
     const f = this.f, k = v * TRAIL_POSES + this.trailHead[v];
-    this.trailX[k] = f.x[v]; this.trailZ[k] = f.z[v];
+    this.trailX[k] = f.x[v]; this.trailZ[k] = f.z[v]; this.trailYaw[k] = f.yaw[v];
     this.trailHead[v] = (this.trailHead[v] + 1) % TRAIL_POSES;
     this.trailLength[v] = Math.min(TRAIL_POSES, this.trailLength[v] + 1);
   }
@@ -86,12 +94,12 @@ export class TruckRecovery {
   private pop(v: number) { this.trailHead[v] = (this.trailHead[v] + TRAIL_POSES - 1) % TRAIL_POSES; this.trailLength[v]--; }
 
   /**
-   * Before the controller drives: steers a running trail retreat, or crawls a truck at the last step.
+   * Before the controller drives: replays a running trail retreat, or crawls a truck at the last step.
    * Returns true when this tick's motion is already done.
    */
   steer(v: number) {
     const f = this.f;
-    if (this.retreatLeft[v] > 0) { this.steerRetreat(v); return false; }
+    if (this.retreatLeft[v] > 0) return this.replay(v);
     return this.stage[v] >= STAGE_CRAWL && f.seat(v, DRIVER) >= 0 && this.crawl(v);
   }
 
@@ -126,7 +134,11 @@ export class TruckRecovery {
       this.noteLoop(v);
       if (this.trailLength[v] > 1) this.startRetreat(v);
     }
-    if (stall >= LADDER.crawl && this.stage[v] < STAGE_CRAWL) { this.stage[v] = STAGE_CRAWL; this.escalate(v, 'crawl'); f.metrics.crawls++; }
+    if (stall >= LADDER.crawl && this.stage[v] < STAGE_CRAWL) {
+      this.stage[v] = STAGE_CRAWL; this.restartAt[v] = now + LADDER_RESTART; this.escalate(v, 'crawl'); f.metrics.crawls++;
+    }
+    // Nothing moved it, not even the crawl (another truck, or no trail yet): climb the ladder again.
+    else if (this.stage[v] === STAGE_CRAWL && now >= this.restartAt[v]) this.stage[v] = 0;
   }
 
   /** Progress (or a lost driver): the clock restarts here and the ladder is reset. */
@@ -183,31 +195,48 @@ export class TruckRecovery {
       if ((f.x[v] - this.trailX[k]) ** 2 + (f.z[v] - this.trailZ[k]) ** 2 >= (TRAIL_SPACING * 0.7) ** 2) break;
       this.pop(v);
     }
-    f.mode[v] = Maneuver.Reverse; f.committedUntil[v] = f.due[v] = Infinity; f.urgent[v] = f.blocked[v] = f.exitLeft[v] = f.stalledTicks[v] = 0;
-    this.steerRetreat(v);
+    this.retreatWait[v] = 0;
+    f.mode[v] = Maneuver.Reverse; f.desiredYaw[v] = f.yaw[v]; f.desiredSpeed[v] = -RETREAT_SPEED;
+    f.committedUntil[v] = f.due[v] = Infinity; f.urgent[v] = f.blocked[v] = f.exitLeft[v] = f.stalledTicks[v] = 0;
   }
 
-  /** Reverses toward the previous trail pose: the body points away from it, so the tail leads. */
-  private steerRetreat(v: number) {
-    const f = this.f, sim = f.sim;
-    const moved = Math.hypot(f.x[v] - f.previousX[v], f.z[v] - f.previousZ[v]);
-    this.retreatLeft[v] -= moved;
+  /**
+   * One tick of trail retreat: the truck is moved back toward its previous recorded pose, position and heading
+   * together. Terrain never changes, so those poses are statically clear by construction; only other trucks are
+   * checked, and soldiers in the way are moved aside as in the crawl. Returns true when the truck moved.
+   */
+  private replay(v: number) {
+    const f = this.f;
     while (this.trailLength[v] > 1) {
       const k = this.last(v);
-      if ((f.x[v] - this.trailX[k]) ** 2 + (f.z[v] - this.trailZ[k]) ** 2 > 0.3 ** 2) break;
+      if ((f.x[v] - this.trailX[k]) ** 2 + (f.z[v] - this.trailZ[k]) ** 2 > 1e-6) break;
       this.pop(v);
     }
-    // Done, out of road, or the way back is blocked: plan afresh from here.
-    if (this.retreatLeft[v] <= 0 || this.trailLength[v] <= 1 || f.stalledTicks[v] > 12) { this.endRetreat(v); return; }
-    const k = this.last(v);
-    f.mode[v] = Maneuver.Reverse; f.blocked[v] = f.urgent[v] = 0;
-    f.desiredYaw[v] = Math.atan2(f.x[v] - this.trailX[k], f.z[v] - this.trailZ[k]);
-    f.desiredSpeed[v] = -Math.min(RETREAT_SPEED, sim.tuning.truckReverseSpeed);
+    if (this.retreatLeft[v] <= 0 || this.trailLength[v] <= 1) { this.endRetreat(v); return false; }
+    const k = this.last(v), x = f.x[v], z = f.z[v], yaw = f.yaw[v];
+    const dx = this.trailX[k] - x, dz = this.trailZ[k] - z, length = Math.hypot(dx, dz);
+    const t = Math.min(1, RETREAT_SPEED * CONFIG.step / length), tx = x + dx * t, tz = z + dz * t;
+    const tyaw = yaw + angleDelta(this.trailYaw[k], yaw) * t;
+    if (!f.ground.trucksClear(v, x, z, yaw, tx, tz, tyaw)) {
+      // Another truck behind: wait a moment for it, then plan afresh from here.
+      if (++this.retreatWait[v] > RETREAT_WAIT) this.endRetreat(v);
+      f.vx[v] = f.vz[v] = 0;
+      return true;
+    }
+    this.retreatWait[v] = 0;
+    f.mode[v] = Maneuver.Reverse; f.desiredYaw[v] = tyaw; f.desiredSpeed[v] = -RETREAT_SPEED;
+    f.setPose(v, tx, tz, tyaw); f.vx[v] = f.vz[v] = 0;
+    this.retreatLeft[v] -= length * t;
+    this.displace(v);
+    if (this.retreatLeft[v] <= 0) this.endRetreat(v);
+    return true;
   }
 
   private endRetreat(v: number) {
     const f = this.f, now = f.sim.time;
     this.retreatLeft[v] = 0;
+    // Stop here (not in the retreat's reverse) until the re-plan, due next tick.
+    f.desiredSpeed[v] = 0; f.mode[v] = Maneuver.Hold;
     f.committedUntil[v] = now; f.due[v] = now; f.urgent[v] = 1; f.blocked[v] = 0;
   }
 

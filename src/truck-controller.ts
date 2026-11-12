@@ -4,6 +4,14 @@ import { DRIVER, Maneuver, TRUCK, angleDelta, type TruckBlocker } from './vehicl
 import type { VehicleFleet } from './vehicles.ts';
 
 const SKIN = 0.002;
+/**
+ * Overlap a disk already touching another truck may slide through, so trucks pressed side by side, or nosed into the
+ * bumps between footprint disks (0.02 deep), are not glued together. Any overlap up to TOUCH_SOFT is fine;
+ * past it a move may deepen by TOUCH_BUMP (to cross a bump) up to TOUCH_HARD. Sweeps from outside still stop
+ * at contact, and moving straight apart is always allowed.
+ */
+const TOUCH_SOFT = 0.03, TOUCH_BUMP = 0.025, TOUCH_HARD = 0.06;
+const slides = (start: number, deepest: number) => deepest <= TOUCH_SOFT || deepest <= TOUCH_HARD && deepest <= start + TOUCH_BUMP;
 type FootTraffic = 'all' | 'allies' | 'none';
 
 /** Ground physics for the truck. Crew, weapons, and damage belong to the fleet. */
@@ -80,7 +88,7 @@ export class TruckController {
         if (other === v || Math.abs(f.y[other] - y) > TRUCK.hull.top + 0.24) continue;
         for (const offset of TRUCK.disks) {
           const dist = this.sweepDisks(f.x[other] + f.sin[other] * offset, f.z[other] + f.cos[other] * offset,
-            radius + TRUCK.radius + SKIN, fraction);
+            radius + TRUCK.radius + SKIN, fraction, true);
           if (dist >= fraction) continue;
           if (blocker) {
             blocker.kind = 'truck'; blocker.id = f.id[other]; blocker.x = f.x[other]; blocker.z = f.z[other]; blocker.atStart = dist === 0;
@@ -93,7 +101,7 @@ export class TruckController {
     return fraction;
   }
 
-  private sweepDisks(x: number, z: number, radius: number, fraction: number) {
+  private sweepDisks(x: number, z: number, radius: number, fraction: number, truck = false) {
     for (let k = 0; k < TRUCK.disks.length; k++) {
       const ax = this.ax[k], az = this.az[k], dx = this.bx[k] - ax, dz = this.bz[k] - az;
       const ox = x - ax, oz = z - az;
@@ -104,6 +112,9 @@ export class TruckController {
       if (square <= radius * radius) {
         // A touching disk can move away or slide tangent, including when backing out.
         if (len > 1e-8 && inward <= 1e-10) continue;
+        // Sliding past it is fine too while the overlap at the closest approach stays shallow.
+        const s = Math.min(1, inward / (len * len));
+        if (truck && len > 1e-8 && slides(radius - Math.sqrt(square), radius - Math.hypot(ox - dx * s, oz - dz * s))) continue;
         t = 0;
       } else {
         if (len < 1e-8 || inward <= 0) continue;
@@ -123,6 +134,28 @@ export class TruckController {
     margin: number, feet: FootTraffic, ignore?: readonly number[], blocker?: TruckBlocker) {
     // Placement starts with a static footprint test; the sweep then checks the exit.
     return this.sweep(v, x, z, yaw, tx, tz, tyaw, margin, feet, ignore, false, blocker) === 1;
+  }
+
+  /**
+   * Other trucks only, for replaying poses the truck already drove through (statically clear) in short steps.
+   * The end pose may overlap another truck as a touching sweep may slide (see TOUCH_SOFT).
+   */
+  trucksClear(v: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number) {
+    const f = this.fleet, trucks = f.grid, sn = Math.sin(tyaw), cs = Math.cos(tyaw), s0 = Math.sin(yaw), c0 = Math.cos(yaw);
+    const reach = 2 * (TRUCK.reach + TRUCK.radius) + SKIN, contact = 2 * TRUCK.radius + SKIN;
+    for (let row = trucks.row(tz - reach); row <= trucks.row(tz + reach); row++) for (let col = trucks.column(tx - reach); col <= trucks.column(tx + reach); col++) {
+      for (let other = trucks.heads[row * trucks.columns + col]; other >= 0; other = trucks.next[other]) {
+        if (other === v || Math.abs(f.y[other] - f.y[v]) > TRUCK.hull.top + 0.24) continue;
+        let end = Infinity, start = Infinity;
+        for (const a of TRUCK.disks) for (const b of TRUCK.disks) {
+          const ox = f.x[other] + f.sin[other] * b, oz = f.z[other] + f.cos[other] * b;
+          end = Math.min(end, Math.hypot(tx + sn * a - ox, tz + cs * a - oz) - contact);
+          start = Math.min(start, Math.hypot(x + s0 * a - ox, z + c0 * a - oz) - contact);
+        }
+        if (end < 0 && end < start && !slides(-start, -end)) return false;
+      }
+    }
+    return true;
   }
 
   blocksFoot(x: number, y: number, z: number, radius: number) {
