@@ -12,6 +12,7 @@ export class TruckController {
   private readonly az = new Float64Array(TRUCK.disks.length);
   private readonly bx = new Float64Array(TRUCK.disks.length);
   private readonly bz = new Float64Array(TRUCK.disks.length);
+  private readonly motion = { yaw: 0, vx: 0, vz: 0 };
   private readonly contactLatch = new Map<number, { truck: number; soldier: number }>();
   private contactFoot = -1;
   private contactNX = 0;
@@ -33,11 +34,11 @@ export class TruckController {
 
   /** Exact disk sweeps for translation; the short rotation chord is padded by its arc sagitta. */
   private sweep(v: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number,
-    clearance: number, feet: FootTraffic, ignore?: readonly number[], truncate = false) {
+    clearance: number, feet: FootTraffic, ignore?: readonly number[], truncate = false,
+    blocker = this.fleet.trace && v >= 0 ? this.lastBlocker : undefined) {
     const f = this.fleet, sim = f.sim, grid = sim.grid, trucks = f.grid;
     const sin = Math.sin(yaw), cos = Math.cos(yaw), sn = Math.sin(tyaw), cs = Math.cos(tyaw);
     const radius = TRUCK.radius + clearance + TRUCK.reach * (1 - Math.cos(angleDelta(tyaw, yaw) * 0.5));
-    const blocker = f.trace && v >= 0 ? this.lastBlocker : undefined;
     if (blocker) blocker.padding = radius - TRUCK.radius;
     this.contactFoot = -1;
     let fraction = 1;
@@ -118,9 +119,9 @@ export class TruckController {
   }
 
   clear(v: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number,
-    margin: number, feet: FootTraffic, ignore?: readonly number[]) {
+    margin: number, feet: FootTraffic, ignore?: readonly number[], blocker?: TruckBlocker) {
     // Placement starts with a static footprint test; the sweep then checks the exit.
-    return this.sweep(v, x, z, yaw, tx, tz, tyaw, margin, feet, ignore) === 1;
+    return this.sweep(v, x, z, yaw, tx, tz, tyaw, margin, feet, ignore, false, blocker) === 1;
   }
 
   blocksFoot(x: number, y: number, z: number, radius: number) {
@@ -191,6 +192,23 @@ export class TruckController {
     }
   }
 
+  /** Calculate one physics step without changing the truck. The result is reused. */
+  nextMotion(yaw: number, vx: number, vz: number, speed: number, heading: number, wanted: number) {
+    const t = this.fleet.sim.tuning, dt = CONFIG.step;
+    const angle = wanted ? angleDelta(heading, yaw) : 0;
+    const turn = t.truckTurnRate * dt / (1 + 0.075 * speed);
+    const nextYaw = yaw + Math.max(-turn, Math.min(turn, angle));
+    const sn = Math.sin(nextYaw), cs = Math.cos(nextYaw);
+    wanted = Math.max(-t.truckReverseSpeed, Math.min(t.truckSpeed, wanted)) * Math.max(0.14, Math.cos(angle));
+    const forward = vx * sn + vz * cs, sideways = (vx * cs - vz * sn) * Math.max(0, 1 - t.truckGrip * dt);
+    const limit = (Math.sign(wanted) === Math.sign(forward) && Math.abs(wanted) > Math.abs(forward) || !forward && wanted ? t.truckAcceleration : t.truckBraking) * dt;
+    const nextForward = forward + Math.max(-limit, Math.min(limit, wanted - forward));
+    this.motion.yaw = nextYaw;
+    this.motion.vx = nextForward * sn + sideways * cs;
+    this.motion.vz = nextForward * cs - sideways * sn;
+    return this.motion;
+  }
+
   drive(v: number) {
     const f = this.fleet, sim = f.sim, t = sim.tuning, dt = CONFIG.step;
     const driven = f.seat(v, DRIVER) >= 0;
@@ -199,15 +217,8 @@ export class TruckController {
     if (f.exitLeft[v] > 0) wanted = Math.min(wanted, 2.25);
     const x = f.x[v], z = f.z[v], yaw = f.yaw[v], vx = f.vx[v], vz = f.vz[v];
     if (wanted === 0 && Math.abs(vx) + Math.abs(vz) < 1e-6) return;
-    const speed = Math.hypot(vx, vz), angle = driven && wanted ? angleDelta(f.desiredYaw[v], yaw) : 0;
-    const turn = t.truckTurnRate * dt / (1 + 0.075 * speed);
-    const nextYaw = yaw + Math.max(-turn, Math.min(turn, angle));
-    const sn = Math.sin(nextYaw), cs = Math.cos(nextYaw);
-    wanted = Math.max(-t.truckReverseSpeed, Math.min(t.truckSpeed, wanted)) * Math.max(0.14, Math.cos(angle));
-    const forward = vx * sn + vz * cs, sideways = (vx * cs - vz * sn) * Math.max(0, 1 - t.truckGrip * dt);
-    const limit = (Math.sign(wanted) === Math.sign(forward) && Math.abs(wanted) > Math.abs(forward) || !forward && wanted ? t.truckAcceleration : t.truckBraking) * dt;
-    const nextForward = forward + Math.max(-limit, Math.min(limit, wanted - forward));
-    const sx = nextForward * sn + sideways * cs, sz = nextForward * cs - sideways * sn;
+    const speed = Math.hypot(vx, vz);
+    const { yaw: nextYaw, vx: sx, vz: sz } = this.nextMotion(yaw, vx, vz, speed, f.desiredYaw[v], wanted);
     const dx = sx * dt, dz = sz * dt;
     const fraction = this.sweep(v, x, z, yaw, x + dx, z + dz, nextYaw, 0, 'all', undefined, true);
     const travel = fraction < 1 ? Math.max(0, fraction - 0.0001) : 1;

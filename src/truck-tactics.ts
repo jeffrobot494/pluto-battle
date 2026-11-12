@@ -1,3 +1,4 @@
+import { CONFIG } from './config.ts';
 import { DRIVER, GUNNER, PASSENGER, Maneuver, TRUCK, angleDelta } from './vehicle-types.ts';
 import type { VehicleFleet } from './vehicles.ts';
 import { maneuverName, type RecoveryCheck, type RouteBlock, type RouteCheck } from './truck-trace.ts';
@@ -7,6 +8,9 @@ const MAX_DECISIONS = 32;
 const TRAFFIC = 2;
 const DETOUR_ANGLES = [0.50, -0.50, 0.95, -0.95, 1.50, -1.50];
 const RECOVERY_DIRECTIONS = [-1, 1];
+const RECOVERY_STEERING = [0.4, -0.4];
+const RECOVERY_DISTANCE = 0.85;
+const RECOVERY_STEPS = Math.ceil(0.7 / CONFIG.step);
 
 class Route {
   mode: Maneuver = Maneuver.Hold;
@@ -225,22 +229,55 @@ export class TruckTactics {
     // A truck can stop inside the planner's extra clearance after a collision.
     // Test straight, slow recovery at the physical footprint so it can leave that margin.
     const recovery: RecoveryCheck[] | undefined = trace ? [] : undefined;
+    const blocker = f.ground.lastBlocker;
+    let reverseRock: number | null = null;
     for (const direction of RECOVERY_DIRECTIONS) {
-      const tx = x + direction * f.sin[v] * 0.85, tz = z + direction * f.cos[v] * 0.85;
-      const clear = f.ground.clear(v, x, z, yaw, tx, tz, yaw, 0, 'all');
+      const tx = x + direction * f.sin[v] * RECOVERY_DISTANCE, tz = z + direction * f.cos[v] * RECOVERY_DISTANCE;
+      const clear = f.ground.clear(v, x, z, yaw, tx, tz, yaw, 0, 'all', undefined, blocker);
       const reverse = direction < 0;
       if (recovery) recovery.push({
         direction: reverse ? 'reverse' : 'forward',
         blockedBy: clear ? null : this.routeBlock(reverse ? 'reverse-fallback' : 'forward-fallback', x, z, tx, tz),
       });
-      if (!clear) continue;
+      if (!clear) {
+        if (reverse) reverseRock = blocker.kind === 'rock' ? blocker.id : null;
+        continue;
+      }
       const speed = direction * Math.min(2, reverse ? t.truckReverseSpeed : t.truckSpeed);
       this.commit(v, reverse ? Maneuver.Reverse : Maneuver.Escape, yaw, speed);
       if (trace && checks) trace.decision(v, reverse ? 'fallback-reverse' : 'fallback-forward', waiting, this.routeCount, checks, null, recovery);
       return;
     }
+    // A rock alongside the chassis can cut off both straight paths.
+    if (reverseRock !== null && blocker.kind === 'rock' && blocker.id === reverseRock) {
+      const reverseSpeed = -Math.min(2, t.truckReverseSpeed);
+      for (const steering of RECOVERY_STEERING) {
+        if (!this.checkSteeredReverse(v, steering, reverseSpeed, recovery)) continue;
+        this.commit(v, Maneuver.Reverse, yaw + steering, reverseSpeed);
+        if (trace && checks) trace.decision(v, 'fallback-reverse', waiting, this.routeCount, checks, null, recovery);
+        return;
+      }
+    }
     this.commit(v, Maneuver.Hold, yaw, 0);
     if (trace && checks) trace.decision(v, 'no-clear-route', waiting, this.routeCount, checks, null, recovery);
+  }
+
+  private checkSteeredReverse(v: number, steering: number, speed: number, recovery?: RecoveryCheck[]) {
+    const f = this.f, startX = f.x[v], startZ = f.z[v], heading = f.yaw[v] + steering;
+    let x = startX, z = startZ, yaw = f.yaw[v], vx = f.vx[v], vz = f.vz[v];
+    // Near a rock, one long chord can cross the obstacle even when the actual turn clears it.
+    for (let n = 0; n < RECOVERY_STEPS; n++) {
+      const next = f.ground.nextMotion(yaw, vx, vz, Math.hypot(vx, vz), heading, speed);
+      const tx = x + next.vx * CONFIG.step, tz = z + next.vz * CONFIG.step;
+      if (!f.ground.clear(v, x, z, yaw, tx, tz, next.yaw, 0, 'all')) {
+        recovery?.push({ direction: 'reverse', steering, blockedBy: this.routeBlock('reverse-fallback', x, z, tx, tz) });
+        return false;
+      }
+      x = tx; z = tz; yaw = next.yaw; vx = next.vx; vz = next.vz;
+      if ((x - startX) ** 2 + (z - startZ) ** 2 >= RECOVERY_DISTANCE ** 2) break;
+    }
+    recovery?.push({ direction: 'reverse', steering, blockedBy: null });
+    return true;
   }
 
   private standoff(range: number) {

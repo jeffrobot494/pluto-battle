@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { CONFIG } from '../src/config.ts';
+import { prepareTerrain } from '../src/navigation.ts';
 import { BattleSimulation } from '../src/simulation.ts';
 import { Terrain } from '../src/terrain.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
@@ -95,4 +97,27 @@ test('a truck can pull forward if its rear is against the map edge', () => {
   assert.equal(decision.recovery[0].direction, 'reverse');
   assert.equal(decision.recovery[0].blockedBy!.blocker.kind, 'map-edge');
   assert.deepEqual(decision.recovery[1], { direction: 'forward', blockedBy: null });
+});
+
+test('a truck can steer in reverse when the same rock blocks both straight recoveries', () => {
+  const seed = 74319;
+  const tuning = { ...DEFAULT_TUNING, count: 20, columns: 5, seed };
+  const { terrain, navigation } = prepareTerrain(tuning, seed, 'canyon');
+  const sim = new BattleSimulation(tuning.count, seed, CONFIG.capacity, tuning, terrain, navigation);
+  const trace = sim.vehicles.startTrace();
+  sim.queue({ type: 'deployTrucks', teams: 3, x: 0, z: 0, radius: Math.hypot(tuning.halfWidth, tuning.halfDepth) + 1 });
+  step(sim, 375);
+
+  const truck = trace.report().trucks.find(entry => entry.id === 7);
+  assert.ok(truck?.snapshot);
+  const contact = truck.events.find(event => event.kind === 'contact' && event.blocker.kind === 'rock' && event.blocker.id === 12);
+  const decision = truck.events.find(event => event.kind === 'decision' && event.recovery.some(check => check.steering && !check.blockedBy));
+  assert.ok(contact);
+  assert.ok(decision?.kind === 'decision');
+  assert.equal(decision.outcome, 'fallback-reverse');
+  assert.deepEqual(decision.recovery.slice(0, 2).map(check => [check.direction, check.blockedBy?.blocker.id]), [
+    ['reverse', 12], ['forward', 12],
+  ]);
+  assert.ok(Math.hypot(truck.snapshot.x - contact.x, truck.snapshot.z - contact.z) > 0.85);
+  assert.equal(truck.events.some(event => event.kind === 'contact' && event.tick > decision.tick), false);
 });
