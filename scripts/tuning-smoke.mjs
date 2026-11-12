@@ -9,9 +9,13 @@ const browser = await chromium.launch({ executablePath, args: ['--use-angle=d3d1
 const errors = [];
 async function tune(target, key, value) {
   const group = await target.locator(`[data-control="${key}"]`).getAttribute('data-group');
-  await target.click(`[data-tab="${group}"]`); await target.locator(`[data-tuning-key="${key}"]`).fill(String(value));
+  await target.click(`[data-tab="${group}"]`);
+  const input = target.locator(`[data-tuning-key="${key}"]`);
+  if (await input.getAttribute('type') === 'checkbox') await input.setChecked(Boolean(value));
+  else await input.fill(String(value));
 }
 const changed = {
+  keepCorpses: 1,
   gravity: 12, explosionRadius: 5, explosionDamage: 40, explosionImpulse: 15, count: 64, health: 150, damage: 12, range: 12, fireInterval: 0.35, speed: 4, radius: 0.35,
   halfWidth: 20, halfDepth: 30, frontline: 9, columns: 8, columnSpacing: 1.2, rowSpacing: 1.1,
   jitterX: 0.1, jitterZ: 0.1, seed: 1234, searchPadding: 6, searchInterval: 0.2, initialSearchDelay: 0.25, reactionDelay: 0.8,
@@ -29,7 +33,7 @@ try {
   await page.waitForFunction(() => window.__battle?.ready); await page.evaluate(() => window.__battle.setPaused(true));
   assert.equal(await page.locator('#tuning-panel').isVisible(), false);
   await page.click('#tuning-toggle'); assert.equal(await page.locator('#tuning-panel').isVisible(), true);
-  assert.equal(await page.locator('[data-tuning-key]').count(), 42);
+  assert.equal(await page.locator('[data-tuning-key]').count(), Object.keys(changed).length);
   const resources = await page.evaluate(() => ({ ...window.__battle.renderer.webgl.info.memory }));
   for (const [key, value] of Object.entries(changed)) {
     await tune(page, key, value);
@@ -79,7 +83,7 @@ try {
   const phone = await mobile.newPage(); phone.on('pageerror', error => errors.push(error.message));
   await phone.goto(process.env.BATTLE_URL ?? 'http://localhost:5180/'); await phone.waitForFunction(() => window.__battle?.ready);
   await phone.evaluate(() => window.__battle.setPaused(true)); await phone.tap('#tuning-toggle');
-  assert.equal(await phone.locator('[data-tuning-key]').count(), 42);
+  assert.equal(await phone.locator('[data-tuning-key]').count(), Object.keys(changed).length);
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await tune(phone, 'damage', 20); assert.equal(await phone.evaluate(() => window.__battle.sim.rifle.damage), 20);
   await phone.locator('.tuning-scroll').evaluate(element => { element.scrollTop = 0; });

@@ -13,20 +13,34 @@ export const DEFAULT_TUNING = {
   moveRetryDelay: 0.2, flankStuckTime: 0.5, flankTimeout: 4, flankSpacing: 0.9, congestionCost: 5,
   flashDuration: CONFIG.hit.duration as number, flashIntensity: CONFIG.hit.intensity as number,
   gravity: CONFIG.physics.gravity as number, explosionRadius: CONFIG.explosion.radius as number,
+  keepCorpses: 0,
   explosionDamage: CONFIG.explosion.damage as number, explosionImpulse: CONFIG.explosion.impulse as number,
   twistThreshold: 12, twistCoast: 0.4,
   rocketRange: CONFIG.rocket.range as number, rocketSpeed: CONFIG.rocket.speed as number,
   rocketRadius: CONFIG.rocket.radius as number, rocketDamage: CONFIG.rocket.damage as number, rocketImpulse: CONFIG.rocket.impulse as number,
+  truckPlacementDistance: 6, truckPlacementRetry: 14, truckRecruitRadius: 5, truckBoardingSpeed: 1.4, truckReservationTime: 3,
+  truckHealth: 260, truckCrewArmor: 0.42, truckSpeed: 10.5, truckAcceleration: 8, truckBraking: 15,
+  truckReverseSpeed: 3.8, truckTurnRate: 2.8, truckGrip: 9, truckSlope: 0.68,
+  turretRangePosition: 77, turretDamage: 20, turretInterval: 0.36,
+  truckStandoff: 0.65, truckCrowdRisk: 1, truckFriendlyRisk: 3.5, truckRamAggression: 1.1,
+  truckDecisionInterval: 1, truckCommitment: 0.8, truckDecisionsPerTick: 8,
+  truckRamSpeed: 4.5, truckRamDamage: 19, truckRamImpulse: 2.2, truckImpactLoss: 0.18,
+  truckBlastRadius: 3.4, truckBlastDamage: 64, truckBlastImpulse: 10,
 };
 export type TuningKey = keyof typeof DEFAULT_TUNING;
 export type TuningValues = Record<TuningKey, number>;
 export interface TuningDefinition {
   key: TuningKey; label: string; group: string; min: number; max: number; step: number;
-  unit: string; restart: boolean; help: string;
+  unit: string; restart: boolean; help: string; checkbox?: boolean;
+}
+
+function vehicle(key: TuningKey, label: string, min: number, max: number, step: number, unit: string, help: string): TuningDefinition {
+  return { key, label, group: 'Vehicles', min, max, step, unit, restart: false, help };
 }
 
 export const TUNING: readonly TuningDefinition[] = [
   { key: 'gravity', label: 'Gravity strength', group: 'Physics & explosions', min: 0, max: 50, step: 0.1, unit: 'u/s²', restart: false, help: 'Downward acceleration. Applies immediately to airborne bodies; zero enables weightless testing.' },
+  { key: 'keepCorpses', label: 'Keep settled corpses', group: 'Physics & explosions', min: 0, max: 1, step: 1, unit: '', restart: false, checkbox: true, help: 'Keep one in five fallen soldiers visible until the next battle. Toggle anytime to show or hide settled bodies.' },
   { key: 'explosionRadius', label: 'Explosion radius', group: 'Physics & explosions', min: 0.5, max: 20, step: 0.1, unit: 'u', restart: false, help: 'Radius of the next test explosion, measured in all three dimensions.' },
   { key: 'explosionDamage', label: 'Explosion damage', group: 'Physics & explosions', min: 0, max: 1000, step: 1, unit: 'HP', restart: false, help: 'Damage once to every living soldier inside the sphere, including allies. Zero tests motion only.' },
   { key: 'explosionImpulse', label: 'Explosion impulse', group: 'Physics & explosions', min: 0, max: 40, step: 0.1, unit: 'u/s', restart: false, help: 'Peak velocity change for unit-mass infantry. Falls linearly to zero at the sphere edge.' },
@@ -68,7 +82,46 @@ export const TUNING: readonly TuningDefinition[] = [
   { key: 'flashIntensity', label: 'Damage-flash intensity', group: 'Hit feedback', min: 0.1, max: 3, step: 0.1, unit: '', restart: false, help: 'Brightness of the emissive hit flash.' },
   { key: 'twistThreshold', label: 'Twist start angle', group: 'Camera', min: 0, max: 45, step: 1, unit: '°', restart: false, help: 'How far two fingers must twist before the camera starts turning. Higher keeps pinch-to-zoom from rotating the view by accident.' },
   { key: 'twistCoast', label: 'Twist coasting', group: 'Camera', min: 0, max: 2, step: 0.05, unit: 's', restart: false, help: 'How long the camera keeps spinning after a twist is released mid-motion. Zero stops the moment fingers lift; touching the screen always stops it.' },
+  vehicle('truckPlacementDistance', 'Placement distance', 0.5, 15, 0.1, 'u', 'How far from a crew the game searches for open ground and a clear exit.'),
+  vehicle('truckPlacementRetry', 'Placement retry window', 0.5, 60, 0.1, 's', 'How long a painted crew waits for a spot. Waiting soldiers keep fighting.'),
+  vehicle('truckRecruitRadius', 'Recruitment radius', 0.5, 12, 0.1, 'u', 'How far a truck looks for soldiers to fill empty seats.'),
+  vehicle('truckBoardingSpeed', 'Boarding speed limit', 0.1, 5, 0.1, 'u/s', 'Maximum chassis speed at which a recruit can board.'),
+  vehicle('truckReservationTime', 'Seat reservation timeout', 0.5, 12, 0.1, 's', 'How long a truck waits for a recruit to reach a reserved seat.'),
+  vehicle('truckHealth', 'Hull health', 25, 1500, 1, 'HP', 'Rescales surviving hulls proportionally.'),
+  vehicle('truckCrewArmor', 'Crew armor', 0, 0.95, 0.01, '', 'Fraction of incoming damage absorbed while seated. Does not protect against the truck’s own destruction.'),
+  vehicle('truckSpeed', 'Top speed', 2, 24, 0.1, 'u/s', 'Maximum forward speed on open ground.'),
+  vehicle('truckAcceleration', 'Acceleration', 1, 24, 0.1, 'u/s²', 'How quickly a driver can build forward or reverse speed.'),
+  vehicle('truckBraking', 'Braking', 1, 32, 0.1, 'u/s²', 'How quickly the truck slows when a driver brakes or the driver’s seat is empty.'),
+  vehicle('truckReverseSpeed', 'Reverse speed', 0.5, 10, 0.1, 'u/s', 'Maximum speed while backing out.'),
+  vehicle('truckTurnRate', 'Turn rate', 0.5, 5, 0.05, 'rad/s', 'Maximum steering rate. Faster travel makes turns wider.'),
+  vehicle('truckGrip', 'Lateral grip', 1, 24, 0.1, '/s', 'How quickly the tires pull a slide back in line with the chassis.'),
+  vehicle('truckSlope', 'Slope limit', 0.1, 1.2, 0.01, '', 'Steepest grade the chassis can cross, in rise per unit of run.'),
+  vehicle('turretRangePosition', 'Turret range', 1, 99, 1, '%', 'Position between the live rifle and rocket ranges. The effective range is shown in world units.'),
+  vehicle('turretDamage', 'Turret damage', 1, 150, 1, 'HP', 'Damage per mounted laser hit, before crew armor.'),
+  vehicle('turretInterval', 'Turret shot interval', 0.05, 3, 0.01, 's', 'Cooldown of the mounted laser, separate from the crew’s weapons.'),
+  vehicle('truckStandoff', 'Turret standoff', 0.1, 0.99, 0.01, '', 'Desired firing distance within the gap between rifle and turret range. Higher values keep more distance.'),
+  vehicle('truckCrowdRisk', 'Crowd risk', 0, 5, 0.05, '', 'How strongly drivers avoid return fire and dense groups along a route.'),
+  vehicle('truckFriendlyRisk', 'Friendly risk', 0, 15, 0.1, '', 'How strongly drivers avoid driving through allied soldiers.'),
+  vehicle('truckRamAggression', 'Ram aggression', 0, 4, 0.05, '', 'How much drivers favor a charge when they have a run-up. Zero disables deliberate charges.'),
+  vehicle('truckDecisionInterval', 'Decision interval', 0.2, 4, 0.05, 's', 'Time between routine driving decisions, staggered across trucks.'),
+  vehicle('truckCommitment', 'Route commitment', 0.2, 4, 0.05, 's', 'How long drivers stick to a clear route before considering a change.'),
+  vehicle('truckDecisionsPerTick', 'Decisions per tick', 1, 32, 1, '', 'Shared limit on detailed driving decisions in one simulation tick.'),
+  vehicle('truckRamSpeed', 'Ram threshold', 1, 15, 0.1, 'u/s', 'Closing speed in the contact direction needed to deal ram damage.'),
+  vehicle('truckRamDamage', 'Ram damage scaling', 0, 80, 0.1, 'HP/(u/s)', 'Damage per unit of closing speed above the threshold.'),
+  vehicle('truckRamImpulse', 'Ram impulse scaling', 0, 8, 0.1, '', 'Knockback per unit of closing speed above the threshold.'),
+  vehicle('truckImpactLoss', 'Impact speed loss', 0, 0.9, 0.01, '', 'Fraction of chassis speed lost with each ram.'),
+  vehicle('truckBlastRadius', 'Destruction blast radius', 0.5, CONFIG.explosion.maxRadius, 0.1, 'u', 'Radius of the blast when the hull is destroyed.'),
+  vehicle('truckBlastDamage', 'Destruction blast damage', 0, 1000, 1, 'HP', 'Damage to each former rider and to nearby soldiers and hulls.'),
+  vehicle('truckBlastImpulse', 'Destruction blast impulse', 0, 40, 0.1, 'u/s', 'Peak blast velocity change. Former riders are thrown from their seats.'),
 ];
+
+export function effectiveTurretRange(values: Pick<TuningValues, 'range' | 'rocketRange' | 'turretRangePosition'>): number | null {
+  const range = values.range + (values.rocketRange - values.range) * values.turretRangePosition / 100;
+  return range > values.range && range < values.rocketRange ? range : null;
+}
+
+// A legacy save with conflicting ranges still works for infantry battles.
+export const TURRET_RANGE_ERROR = 'Laser rifle range must be shorter than rocket range to deploy trucks.';
 
 export function validValue(key: TuningKey, value: number) {
   const def = TUNING.find(d => d.key === key)!;

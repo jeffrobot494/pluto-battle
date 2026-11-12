@@ -87,6 +87,9 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .settings button { width: 100%; display: flex; justify-content: space-between; align-items: center; background: #d2edab; color: #263023; font-size: 11px; border: 0; border-radius: 3px; padding: 10px 12px; }
 .settings button svg { width: 14px; height: 14px; }
 #diagnostics p { font-size: 9px; color: #9d8ca1; line-height: 1.7; margin-bottom: 0; }
+.truck-trace-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#truck-trace-save-full { grid-column: 2; }
+.truck-trace-actions button:disabled { opacity: 0.4; cursor: default; }
 .sound-panel { position: absolute; left: 34px; bottom: 107px; width: 315px; max-width: calc(100% - 68px); max-height: calc(100dvh - 210px); overflow: auto; border: 1px solid #ffffff2b; border-radius: 5px; background: #1e1925f2; backdrop-filter: blur(15px); box-shadow: 0 10px 50px #100b1b44; }
 .sound-panel:not([open]) { width: 235px; background: #221b27cf; }
 .sound-panel summary { position: sticky; top: 0; display: flex; align-items: center; gap: 9px; min-height: 44px; padding: 10px 14px; background: #241d2c; color: #ded5dc; font-size: 11px; cursor: pointer; list-style: none; z-index: 1; user-select: none; }
@@ -317,6 +320,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .mobile-hud #diagnostics { right: var(--hud-right); }
 .mobile-hud .tuning-control { grid-template-columns: 104px minmax(0, 1fr) 68px 18px; padding: 4px 0; }
 .mobile-hud .tuning-control input[type="range"] { height: 26px; }
+.tuning-control input[type="checkbox"] { grid-column: 2 / 4; justify-self: start; width: 20px; height: 20px; margin: 0; accent-color: #bce58d; cursor: pointer; }
 @media (min-height: 641px) {
   .mobile-hud .tuning-tab { padding: 7px 5px; }
 }
@@ -341,7 +345,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
   transform: none;
   width: auto;
   display: grid;
-  grid-template-columns: minmax(66px, 1.25fr) repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(66px, 1.25fr) repeat(4, minmax(0, 1fr));
   grid-template-rows: 1fr 1fr;
   row-gap: 3px;
   padding: 6px 5px 5px;
@@ -349,6 +353,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .mobile-hud .upgrade-title { align-self: end; }
 .mobile-hud .upgrade-target { grid-column: 1; grid-row: 2; align-self: start; }
 .mobile-hud .upgrade-button { grid-row: 1 / -1; }
+.turret-range { grid-column: 1 / -1; font: 10px Consolas, monospace; color: #f4d985; }
 .mobile-hud .upgrade-status { top: auto; right: 0; bottom: calc(100% + 6px); transform: none; max-width: min(260px, 100%); }
 
 /* Replay prototype: playback bar and the recorded player's taps. */

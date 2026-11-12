@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { chromium } from 'playwright';
+import { launchBattleBrowser, serveBattleBuild } from './battle-browser.mjs';
 
-const candidate = `${process.env.USERPROFILE}/AppData/Local/ms-playwright/chromium-1169/chrome-win/chrome.exe`;
-const browser = await chromium.launch({ executablePath: process.env.BATTLE_CHROMIUM ?? (existsSync(candidate) ? candidate : undefined), args: process.env.BATTLE_SOFTWARE ? ['--use-angle=swiftshader'] : ['--use-angle=d3d11', '--force_high_performance_gpu'] });
+const browser = await launchBattleBrowser();
 const errors = [];
 const base = new URL(process.env.BATTLE_URL ?? 'http://localhost:5181/'); base.searchParams.set('flat', '1');
 const url = base.href;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const SNIPER = 2, SHOTGUN = 3;
+const growing = (page, radius) => page.waitForFunction(r => {
+  const zone = window.__battle.zone;
+  return zone && !zone.released && zone.radius > r;
+}, radius);
 
 /** Paused 3 vs 3 on flat ground: friends at x = -2, 0, 2 (z = 0) plus one at x = 14; enemies far away at z = -20. */
 async function fixture(page) {
@@ -36,6 +38,7 @@ try {
   await mkdir('artifacts', { recursive: true });
   // ---------- Desktop mouse ----------
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await serveBattleBuild(context, url);
   const page = await context.newPage(); watch(page);
   await page.goto(url); await page.waitForFunction(() => window.__battle?.ready);
   let f = await fixture(page);
@@ -53,14 +56,15 @@ try {
 
   // Exclusive toggles: pressing another switches, pressing the active one clears.
   const pressed = () => page.$$eval('[data-upgrade]', buttons => buttons.map(b => b.getAttribute('aria-pressed')).join(','));
-  await page.click('[data-upgrade="sniper"]'); assert.equal(await pressed(), 'true,false,false');
-  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,true,false');
-  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,false,false');
-  await page.keyboard.press('1'); assert.equal(await pressed(), 'true,false,false');
-  await page.keyboard.press('Escape'); assert.equal(await pressed(), 'false,false,false');
+  await page.click('[data-upgrade="sniper"]'); assert.equal(await pressed(), 'true,false,false,false');
+  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,true,false,false');
+  await page.click('[data-upgrade="shotgun"]'); assert.equal(await pressed(), 'false,false,false,false');
+  await page.keyboard.press('1'); assert.equal(await pressed(), 'true,false,false,false');
+  await page.keyboard.press('Escape'); assert.equal(await pressed(), 'false,false,false,false');
 
   // A hold with nothing armed grows a neutral zone and does nothing on release.
-  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down(); await wait(700);
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down();
+  await growing(page, 2);
   const neutral = await page.evaluate(() => window.__battle.zone);
   assert.ok(neutral && neutral.radius > 2 && neutral.color === '#ece6f0', JSON.stringify(neutral));
   assert.equal(await page.evaluate(() => window.__battle.renderer.zoneFill.visible), true);
@@ -70,18 +74,16 @@ try {
 
   // Sniper hold over the centre upgrades the nearby friends only.
   await page.keyboard.press('1');
-  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down(); await wait(650);
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down();
+  await growing(page, 2.5);
   const armed = await page.evaluate(() => window.__battle.zone);
   assert.equal(armed.color, '#7fd6ff'); assert.ok(armed.radius > 2.5 && armed.radius < 10, `radius ${armed.radius}`);
-  await page.screenshot({ path: 'artifacts/upgrade-zone-sniper.png' });
   await page.mouse.up();
+  assert.ok(await page.evaluate(() => { const g = window.__battle; g.step(1); return g.renderer.upgradePulses.count > 0; }), 'upgrade pulse rendered');
   for (const slot of [0, 1, 2]) assert.ok(has(await inventory(page, slot), SNIPER), `friend ${slot} upgraded`);
   assert.ok(!has(await inventory(page, 3), SNIPER), 'distant friend unchanged');
   for (const slot of [4, 5, 6, 7]) assert.ok(!has(await inventory(page, slot), SNIPER), 'enemies unchanged');
   assert.match(await page.textContent('#upgrade-status'), /3 soldiers → Sniper rifle/);
-  await page.evaluate(() => window.__battle.step(1));
-  assert.ok(await page.evaluate(() => window.__battle.renderer.upgradePulses.count) > 0, 'upgrade pulse rendered');
-  await page.screenshot({ path: 'artifacts/upgrade-pulse.png' });
 
   // Dragging before the hold begins pans the camera instead.
   const before = await page.evaluate(() => window.__battle.sim.totalUpgrades);
@@ -117,12 +119,14 @@ try {
   // A Sectoid-targeted zone over the enemy line upgrades only Sectoids; one over the friends finds nobody.
   f = await fixture(page); await page.keyboard.press('1');
   const enemyCenter = await page.evaluate(() => { const p = window.__battle.renderer.project(1.5, 0, -20); return { x: (p.x + 1) * innerWidth / 2, y: (1 - p.y) * innerHeight / 2 }; });
-  await page.mouse.move(enemyCenter.x, enemyCenter.y); await page.mouse.down(); await wait(800); await page.mouse.up();
+  await page.mouse.move(enemyCenter.x, enemyCenter.y); await page.mouse.down();
+  await growing(page, 2); await page.mouse.up();
   const enemyUpgraded = [];
   for (const slot of [4, 5, 6, 7]) enemyUpgraded.push(has(await inventory(page, slot), SNIPER));
   assert.ok(enemyUpgraded.filter(Boolean).length >= 2, `enemies upgraded ${enemyUpgraded}`);
   for (const slot of [0, 1, 2, 3]) assert.ok(!has(await inventory(page, slot), SNIPER), 'friends unchanged by a Sectoid zone');
-  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down(); await wait(500); await page.mouse.up();
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down();
+  await growing(page, 1); await page.mouse.up();
   for (const slot of [0, 1, 2]) assert.ok(!has(await inventory(page, slot), SNIPER), 'friends still unchanged');
   assert.match(await page.textContent('#upgrade-status'), /No Sectoids in range/);
 
@@ -148,11 +152,48 @@ try {
   await page.waitForFunction(() => window.__battle.sim.totalExplosions === 1);
   assert.equal(await page.evaluate(() => window.__battle.selectedSoldier), 0);
   await page.click('#restart');
-  assert.equal(await pressed(), 'false,false,false');
+  assert.equal(await pressed(), 'false,false,false,false');
+
+  // A canceled truck paint changes nothing. A completed paused paint commits a crew at rest.
+  f = await fixture(page);
+  await page.keyboard.press('4'); assert.equal(await pressed(), 'false,false,false,true');
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down();
+  await growing(page, 2.05);
+  await page.locator('canvas').dispatchEvent('pointercancel', { pointerId: 1, isPrimary: true });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__battle.sim.vehicles.metrics.paints), 0);
+  await page.mouse.move(f.center.x, f.center.y); await page.mouse.down();
+  await growing(page, 2.15);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__battle.sim.vehicles.count === 1);
+  const truck = await page.evaluate(() => {
+    const g = window.__battle, fleet = g.sim.vehicles, v = fleet.active[0];
+    const p = g.renderer.project(fleet.x[v], fleet.y[v] + 0.48, fleet.z[v]);
+    return { id: fleet.id[v], x: (p.x + 1) * innerWidth / 2, y: (1 - p.y) * innerHeight / 2, speed: fleet.speed(v),
+      deployment: fleet.lastDeployment, rifle: g.sim.rifle.range };
+  });
+  assert.equal(truck.speed, 0); assert.equal(truck.deployment.boarded, 3);
+  assert.match(await page.textContent('#upgrade-status'), /3 boarded · 0 still on foot/);
+  await page.mouse.click(truck.x, truck.y);
+  assert.equal(await page.evaluate(() => window.__battle.selectedVehicle), truck.id);
+  assert.match(await page.textContent('#soldier-card'), /Truck[\s\S]*260 \/ 260 HP[\s\S]*Driver[\s\S]*Gunner[\s\S]*Passenger/);
+  await page.screenshot({ path: 'artifacts/truck-inspection-desktop.png' });
+
+  // A conflicting edit is surfaced in tuning and leaves the active ranges intact.
+  await page.keyboard.press('t');
+  await page.fill('#tuning-filter', 'rifle range');
+  await page.fill('#tune-range', '22');
+  assert.match(await page.textContent('#tuning-status'), /Live ranges are unchanged/);
+  assert.equal(await page.evaluate(() => window.__battle.sim.rifle.range), truck.rifle);
+  await page.fill('#tune-range', '10.5');
+  await page.fill('#tuning-filter', 'turret range');
+  assert.match(await page.textContent('.turret-range'), /Effective range: \d+\.\d+ u/);
+  await page.keyboard.press('Escape');
   await context.close();
 
   // ---------- Phone touch ----------
   const phone = await browser.newContext({ viewport: { width: 412, height: 915 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
+  await serveBattleBuild(phone, url);
   const mobile = await phone.newPage(); watch(mobile);
   await mobile.goto(url); await mobile.waitForFunction(() => window.__battle?.ready);
   f = await fixture(mobile);
@@ -177,10 +218,10 @@ try {
   assert.equal(await mobile.getAttribute('[data-upgrade="sniper"]', 'aria-pressed'), 'true');
   const cdp = await phone.newCDPSession(mobile);
   const touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
-  await touch('touchStart', f.center.x, f.center.y); await wait(650);
+  await touch('touchStart', f.center.x, f.center.y);
+  await growing(mobile, 2.15);
   await touch('touchMove', f.center.x + 3, f.center.y + 2); await wait(100);
   assert.ok((await mobile.evaluate(() => window.__battle.zone))?.radius > 2);
-  await mobile.screenshot({ path: 'artifacts/upgrade-zone-phone.png' });
   await touch('touchEnd');
   for (const slot of [0, 1, 2]) assert.ok(has(await inventory(mobile, slot), SNIPER), `touch upgraded ${slot}`);
   // Finger drag before the hold pans.
@@ -194,6 +235,14 @@ try {
   assert.ok(has(await inventory(mobile, 2), SHOTGUN));
   assert.equal(await mobile.isVisible('#soldier-card'), true);
   await mobile.screenshot({ path: 'artifacts/upgrade-select-phone.png' });
+
+  f = await fixture(mobile);
+  await mobile.tap('[data-upgrade="truck"]');
+  await touch('touchStart', f.center.x, f.center.y);
+  await growing(mobile, 2.15);
+  await touch('touchEnd');
+  assert.equal(await mobile.evaluate(() => window.__battle.sim.vehicles.lastDeployment?.boarded), 3);
+  await mobile.screenshot({ path: 'artifacts/truck-deployment-phone.png' });
   report.layout = layout;
   await phone.close();
 

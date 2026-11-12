@@ -7,6 +7,8 @@ export const CONFIG = {
   soldier: { radius: 0.29, height: 1.12, health: 100, speed: 3.0 },
   hit: { duration: 0.12, intensity: 1 },
   corpseLifetime: 1.8,
+  corpseRetentionGroup: 5,
+  retainedCorpses: 1000,
   maxEffects: 768,
   physics: { gravity: 9.81, friction: 8, contactIterations: 4 },
   explosion: { radius: 4, damage: 35, impulse: 10, maxRadius: 20, effects: 64, duration: 0.45 },

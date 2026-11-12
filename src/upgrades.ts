@@ -2,17 +2,19 @@ import { WEAPON_ID } from './config.ts';
 import type { Team } from './simulation.ts';
 
 /**
- * Battlefield upgrades the player can hand out mid-battle. Adding a weapon here
- * (after defining it in WEAPONS) adds a button to the upgrade menu.
+ * Battlefield upgrades the player can hand out mid-battle. Weapons and vehicle
+ * deployments share the rail and painted zone.
  * `cost` is reserved for the resource system; nothing charges it yet.
  */
 export const UPGRADES = [
-  { id: 'sniper', name: 'Sniper rifle', label: 'Sniper', weapon: WEAPON_ID.sniper, color: '#7fd6ff', key: '1', cost: 0,
+  { id: 'sniper', kind: 'weapon', name: 'Sniper rifle', label: 'Sniper', weapon: WEAPON_ID.sniper, color: '#7fd6ff', key: '1', cost: 0,
     icon: '<circle cx="10" cy="10" r="5.5"/><path d="M10 1.5v5M10 13.5v5M1.5 10h5M13.5 10h5"/>' },
-  { id: 'shotgun', name: 'Shotgun', label: 'Shotgun', weapon: WEAPON_ID.shotgun, color: '#ffb35a', key: '2', cost: 0,
+  { id: 'shotgun', kind: 'weapon', name: 'Shotgun', label: 'Shotgun', weapon: WEAPON_ID.shotgun, color: '#ffb35a', key: '2', cost: 0,
     icon: '<path d="M2 10h6M8 10l9-5.5M8 10h9.5M8 10l9 5.5"/>' },
-  { id: 'rocket', name: 'Rocket launcher', label: 'Rocket', weapon: WEAPON_ID.rocket, color: '#ff6b3d', key: '3', cost: 0,
+  { id: 'rocket', kind: 'weapon', name: 'Rocket launcher', label: 'Rocket', weapon: WEAPON_ID.rocket, color: '#ff6b3d', key: '3', cost: 0,
     icon: '<path d="M3 17l3-3M5 12l3 3M8 15l7.5-7.5c1.5-1.5 2-4 2-5.5-1.5 0-4 .5-5.5 2L4.5 11.5z"/><circle cx="13" cy="7" r="1.2"/>' },
+  { id: 'truck', kind: 'vehicle', name: 'Armored truck', label: 'Truck', color: '#f4d985', key: '4', cost: 0,
+    icon: '<path d="M2 13V7h9v2h4l3 3v3h-2m-4 0H8m-4 0H2v-2m10-4v3h6M5 7V5h5"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="15" r="2"/>' },
 ] as const;
 export type Upgrade = typeof UPGRADES[number];
 export type UpgradeId = Upgrade['id'];

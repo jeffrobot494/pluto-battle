@@ -1,5 +1,5 @@
 import { CONFIG, NO_WEAPON, WEAPON_ID, WEAPONS, type Weapon } from './config.ts';
-import { DEFAULT_TUNING, TUNING, deploymentError, type TuningValues } from './tuning.ts';
+import { DEFAULT_TUNING, TUNING, deploymentError, effectiveTurretRange, type TuningValues } from './tuning.ts';
 import { ARMY_ITEMS, copyEquipment, defaultEquipment, recipientCount, validateEquipment, type EquipmentSettings } from './equipment.ts';
 import { random } from './random.ts';
 import { Terrain } from './terrain.ts';
@@ -7,8 +7,12 @@ import { Navigation } from './navigation.ts';
 import { rayCapsule, raySegmentCapsule } from './collision.ts';
 import { ExplosionEvents, validExplosion, type Explosion } from './explosions.ts';
 import { Rockets, SmokeEvents } from './rockets.ts';
+import { SpatialGrid } from './spatial-grid.ts';
+import { VehicleFleet, type Wreck } from './vehicles.ts';
+import { GUNNER, PASSENGER, VEHICLE_TYPES } from './vehicle-types.ts';
 export { random } from './random.ts';
-export { rayCapsule } from './collision.ts';
+export { rayCapsule, rayCircle } from './collision.ts';
+export { SpatialGrid } from './spatial-grid.ts';
 
 /** Cached line-of-sight refresh on a held target. Only guides movement; every shot casts its own ray. */
 const SIGHT_INTERVAL = 0.12;
@@ -17,9 +21,26 @@ const ROCKET_BIT = 1 << WEAPON_ID.rocket;
 const ROCKET_AIM = [0.12, 0.4, 0.7];
 /** Rockets that hit nothing detonate after this multiple of rocket range. */
 const ROCKET_FUSE = 1.5;
+const WRECKS_PER_TICK = 8;
 
 export type Team = 0 | 1;
 export type Outcome = 'running' | 'plutonians' | 'sectoids' | 'draw';
+export interface RetiredCorpse {
+  readonly id: number;
+  readonly at: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly velocityY: number;
+  readonly yaw: number;
+  readonly fallOffset: number;
+  readonly roll: number;
+  readonly aimPitch: number;
+  readonly radius: number;
+  readonly team: Team;
+  readonly weapon: number;
+}
+
 export type Command =
   | { type: 'spawn'; team: Team; x: number; z: number; weapon?: number }
   | { type: 'equip'; ids: readonly number[]; weapon: number }
@@ -27,65 +48,9 @@ export type Command =
   | { type: 'upgrade'; ids: readonly number[]; weapon: number }
   /** Adds a weapon to every living soldier of `team` within `radius` (ground distance) of x/z. */
   | { type: 'upgradeArea'; team: Team; x: number; z: number; radius: number; weapon: number }
+  /** Team mask: bit 0 = Plutonians, bit 1 = Sectoids. Solo is used by the sparse benchmark. */
+  | { type: 'deployTrucks'; teams: number; x: number; z: number; radius: number; solo?: boolean }
   | ({ type: 'explode' } & Explosion);
-
-/** First distance along a unit direction to a circle. */
-export function rayCircle(x: number, z: number, dx: number, dz: number, cx: number, cz: number, radius: number): number {
-  const ox = x - cx, oz = z - cz, b = ox * dx + oz * dz;
-  const c = ox * ox + oz * oz - radius * radius;
-  if (c <= 0) return 0;
-  if (b >= 0) return Infinity;
-  const d = b * b - c;
-  if (d < 0) return Infinity;
-  const t = -b - Math.sqrt(d);
-  return t >= 0 ? t : Infinity;
-}
-
-/** Intrusive fixed grid. Movement updates membership immediately. No per-query allocations. */
-export class SpatialGrid {
-  readonly columns: number;
-  readonly rows: number;
-  readonly heads: Int32Array;
-  readonly halfWidth: number;
-  readonly halfDepth: number;
-  readonly cellSize = CONFIG.field.cellSize;
-  readonly next: Int32Array;
-  readonly previous: Int32Array;
-  readonly cell: Int32Array;
-  readonly teamCounts: Uint16Array[];
-  private readonly teams: Uint8Array;
-  constructor(capacity: number, halfWidth: number = CONFIG.field.halfWidth, halfDepth: number = CONFIG.field.halfDepth, teams?: Uint8Array) {
-    this.halfWidth = halfWidth; this.halfDepth = halfDepth;
-    this.columns = Math.ceil(halfWidth * 2 / this.cellSize); this.rows = Math.ceil(halfDepth * 2 / this.cellSize);
-    this.heads = new Int32Array(this.columns * this.rows).fill(-1);
-    this.next = new Int32Array(capacity).fill(-1);
-    this.previous = new Int32Array(capacity).fill(-1);
-    this.cell = new Int32Array(capacity).fill(-1);
-    this.teams = teams ?? new Uint8Array(capacity);
-    this.teamCounts = [new Uint16Array(this.heads.length), new Uint16Array(this.heads.length)];
-  }
-  column(x: number) { return Math.max(0, Math.min(this.columns - 1, Math.floor((x + this.halfWidth) / this.cellSize))); }
-  row(z: number) { return Math.max(0, Math.min(this.rows - 1, Math.floor((z + this.halfDepth) / this.cellSize))); }
-  remove(slot: number) {
-    const cell = this.cell[slot];
-    if (cell < 0) return;
-    this.teamCounts[this.teams[slot]][cell]--;
-    const p = this.previous[slot], n = this.next[slot];
-    if (p < 0) this.heads[cell] = n; else this.next[p] = n;
-    if (n >= 0) this.previous[n] = p;
-    this.cell[slot] = this.next[slot] = this.previous[slot] = -1;
-  }
-  insert(slot: number, x: number, z: number) {
-    const cell = this.row(z) * this.columns + this.column(x);
-    if (this.cell[slot] === cell) return;
-    this.remove(slot);
-    const first = this.heads[cell];
-    this.next[slot] = first; this.previous[slot] = -1;
-    if (first >= 0) this.previous[first] = slot;
-    this.heads[cell] = slot; this.cell[slot] = cell;
-    this.teamCounts[this.teams[slot]][cell]++;
-  }
-}
 
 /** Bounded cosmetic event buffer: overwriting effects never changes combat. */
 export class ShotEvents {
@@ -202,6 +167,12 @@ export class BattleSimulation {
   readonly lastHit: Float64Array;
   readonly lastFire: Float64Array;
   readonly diedAt: Float64Array;
+  readonly deathFallOffset: Float32Array;
+  readonly deathRoll: Float32Array;
+  readonly pendingCorpse: Uint8Array;
+  /** Ring of final physics poses. The renderer can consume several retirements between frames. */
+  readonly retiredCorpses: RetiredCorpse[] = [];
+  retiredCorpseCount = 0;
   readonly nextFire: Float64Array;
   readonly nextSearch: Float64Array;
   readonly moving: Uint8Array;
@@ -218,6 +189,7 @@ export class BattleSimulation {
   readonly byId = new Map<number, number>();
   readonly commands: Command[] = [];
   readonly grid: SpatialGrid;
+  readonly vehicles: VehicleFleet;
   readonly shots = new ShotEvents();
   readonly events = new CombatEvents();
   readonly explosions = new ExplosionEvents();
@@ -226,6 +198,8 @@ export class BattleSimulation {
   private readonly steeringRng: () => number;
   /** Jitter for decision timing (search cadence, reactions, retries); separate so it never shifts other streams. */
   private readonly aiRng: () => number;
+  private readonly corpseRng: () => number;
+  private retainedDeathInGroup = 0;
   readonly centerX = new Float64Array(2);
   readonly centerZ = new Float64Array(2);
   time = 0;
@@ -287,6 +261,8 @@ export class BattleSimulation {
     this.id = new Uint32Array(capacity); this.target = new Uint32Array(capacity);
     this.facing = new Float32Array(capacity); this.lastHit = new Float64Array(capacity).fill(-Infinity);
     this.lastFire = new Float64Array(capacity).fill(-Infinity); this.diedAt = new Float64Array(capacity).fill(-Infinity);
+    this.deathFallOffset = new Float32Array(capacity); this.deathRoll = new Float32Array(capacity);
+    this.pendingCorpse = new Uint8Array(capacity);
     this.nextFire = new Float64Array(capacity); this.nextSearch = new Float64Array(capacity);
     this.moving = new Uint8Array(capacity); this.pendingDamage = new Float32Array(capacity);
     this.detourSide = new Int8Array(capacity);
@@ -295,10 +271,12 @@ export class BattleSimulation {
     this.flankTries = new Uint8Array(capacity); this.flankState = new Uint8Array(capacity); this.engaged = new Uint8Array(capacity);
     this.blockedUntil = new Float64Array(capacity);
     this.grid = new SpatialGrid(capacity, this.tuning.halfWidth, this.tuning.halfDepth, this.team); this.rng = random(seed);
+    this.vehicles = new VehicleFleet(this);
     // A separate stream preserves deployment/fire randomness. Handedness has no
     // relationship to unit IDs, team, column parity, or storage order.
     this.steeringRng = random(seed ^ 0x51ed270b);
     this.aiRng = random(seed ^ 0x2c1b3c6d);
+    this.corpseRng = random(seed ^ 0x5e2d58d1);
     if (!Number.isInteger(perTeam) || perTeam < 0 || perTeam * 2 > capacity || perTeam > 500) throw new Error('Supported deployment: 0–500 per team within capacity.');
     const columns = Math.max(1, Math.min(perTeam, this.tuning.columns));
     for (let team = 0; team < 2; team++) for (let n = 0; n < perTeam; n++) {
@@ -317,7 +295,7 @@ export class BattleSimulation {
   }
   get blockedUnits() {
     let count = 0;
-    for (let i = 0; i < this.used; i++) if (this.hp[i] > 0 && (!this.weaponsEnabled || !this.visible[i]) && this.time - this.lastProgress[i] > 2) count++;
+    for (let i = 0; i < this.used; i++) if (this.hp[i] > 0 && this.vehicles.onFoot(i) && (!this.weaponsEnabled || !this.visible[i]) && this.time - this.lastProgress[i] > 2) count++;
     return count;
   }
 
@@ -373,11 +351,15 @@ export class BattleSimulation {
   }
 
   applyLiveTuning(values: TuningValues) {
-    const oldHealth = this.tuning.health, oldInterval = this.rifle.interval;
-    for (const def of TUNING) if (!def.restart) this.tuning[def.key] = values[def.key];
+    const oldHealth = this.tuning.health, oldInterval = this.rifle.interval, oldHull = this.tuning.truckHealth;
+    const rangesLocked = (this.vehicles.count > 0 || this.vehicles.pendingCrews > 0) && effectiveTurretRange(values) === null;
+    for (const def of TUNING) if (!def.restart && !(rangesLocked && (def.key === 'range' || def.key === 'rocketRange' || def.key === 'turretRangePosition'))) {
+      this.tuning[def.key] = values[def.key];
+    }
     this.updateDetourAngles();
     this.rifle.range = this.tuning.range; this.rifle.damage = this.tuning.damage; this.rifle.interval = this.tuning.fireInterval;
     this.rocket.range = this.tuning.rocketRange; this.rocket.damage = this.tuning.rocketDamage;
+    this.vehicles.rescaleHealth(oldHull);
     for (let i = 0; i < this.used; i++) if (this.hp[i] > 0) {
       if (oldHealth !== this.tuning.health) this.hp[i] = Math.min(this.tuning.health, this.hp[i] * this.tuning.health / oldHealth);
       if (this.weapon[i] === 0 && oldInterval !== this.rifle.interval) this.nextFire[i] = this.time + Math.max(0, this.nextFire[i] - this.time) * this.rifle.interval / oldInterval;
@@ -389,8 +371,12 @@ export class BattleSimulation {
     // Own the ID list: callers cannot change a queued command after submission.
     this.commands.push(command.type === 'equip' || command.type === 'upgrade' ? { ...command, ids: Array.from(command.ids) } : { ...command });
   }
-  /** Applies queued commands now. Safe between steps, e.g. so upgrades show while paused. */
-  flushCommands() { this.applyCommands(); }
+  /** Applies noncombat commands between steps so upgrades and the first truck batch can show while paused. */
+  flushCommands() {
+    const paints = this.vehicles.metrics.paints;
+    this.applyCommands(false);
+    if (this.vehicles.metrics.paints !== paints) this.vehicles.place(true);
+  }
 
   /** Living soldiers of `team` inside the zone who do not yet carry `weapon`. */
   upgradeCandidates(team: Team, x: number, z: number, radius: number, weapon: number) {
@@ -417,8 +403,9 @@ export class BattleSimulation {
     const r = this.tuning.radius;
     if (Math.abs(x) > this.grid.halfWidth - r || Math.abs(z) > this.grid.halfDepth - r || !this.clearPosition(-1, x, z, r)) return null;
     let slot = -1;
-    for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && this.time - this.diedAt[i] > CONFIG.corpseLifetime) { slot = i; break; }
+    for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && !this.vehicles.awaitingEjection[i] && this.time - this.diedAt[i] > CONFIG.corpseLifetime) { slot = i; break; }
     if (slot < 0) { if (this.used >= this.capacity) return null; slot = this.used++; }
+    else this.archiveCorpse(slot);
     if (this.id[slot]) this.byId.delete(this.id[slot]);
     const id = this.nextId++;
     this.id[slot] = id; this.byId.set(id, slot);
@@ -436,6 +423,7 @@ export class BattleSimulation {
     this.upgrades[slot] = 0; this.upgradeWeapon[slot] = NO_WEAPON;
     this.facing[slot] = team === 0 ? Math.PI : 0;
     this.lastHit[slot] = this.lastFire[slot] = this.diedAt[slot] = -Infinity;
+    this.pendingCorpse[slot] = 0;
     this.nextFire[slot] = this.time + this.rng() * this.weaponFor(weapon).interval;
     this.nextSearch[slot] = this.time + this.rng() * this.tuning.initialSearchDelay;
     this.grid.insert(slot, x, z); this.alive[team]++;
@@ -446,14 +434,14 @@ export class BattleSimulation {
 
   clearPosition(ignore: number, x: number, z: number, radius: number): boolean {
     if (this.navigation && !this.terrain.canStand(x, z, radius)) return false;
-    // Current prototype supports a common infantry radius. Increase query reach when adding vehicles.
+    const base = ignore >= 0 ? this.y[ignore] : this.terrain.heightAt(x, z);
+    if (this.vehicles.count && this.vehicles.ground.blocksFoot(x, base, z, radius)) return false;
     const reach = radius + this.tuning.radius + 0.002;
     const minX = this.grid.column(x - reach), maxX = this.grid.column(x + reach);
     const minZ = this.grid.row(z - reach), maxZ = this.grid.row(z + reach);
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
       for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
-        if (j === ignore) continue;
-        const base = ignore >= 0 ? this.y[ignore] : this.terrain.heightAt(x, z);
+        if (j === ignore || !this.vehicles.onFoot(j)) continue;
         const verticalGap = Math.max(0, Math.abs(base - this.y[j]) - (CONFIG.soldier.height - radius - this.radius[j]));
         const dx = x - this.x[j], dz = z - this.z[j], minimum = radius + this.radius[j] + 0.001;
         if (dx * dx + dz * dz + verticalGap * verticalGap < minimum * minimum - 1e-10) return false;
@@ -468,12 +456,13 @@ export class BattleSimulation {
     const ox = this.x[i], oz = this.z[i], dx = x - ox, dz = z - oz, length = Math.hypot(dx, dz);
     if (length < 1e-9) return false;
     const ux = dx / length, uz = dz / length;
+    if (this.vehicles.count && this.vehicles.ground.sweepFoot(ox, this.y[i], oz, ux, 0, uz, length, r) < length) return false;
     const midX = ox + dx * 0.5, midZ = oz + dz * 0.5, halfX = Math.abs(dx) * 0.5, halfZ = Math.abs(dz) * 0.5;
     const minX = this.grid.column(Math.min(ox, x) - r * 2 - 0.01), maxX = this.grid.column(Math.max(ox, x) + r * 2 + 0.01);
     const minZ = this.grid.row(Math.min(oz, z) - r * 2 - 0.01), maxZ = this.grid.row(Math.max(oz, z) + r * 2 + 0.01);
     for (let cz = minZ; cz <= maxZ; cz++) for (let cx = minX; cx <= maxX; cx++) {
       for (let j = this.grid.heads[cz * this.grid.columns + cx]; j >= 0; j = this.grid.next[j]) {
-        if (j === i) continue;
+        if (j === i || !this.vehicles.onFoot(j)) continue;
         const minimum = r + this.radius[j] + 0.001;
         if (Math.abs(this.x[j] - midX) > minimum + halfX || Math.abs(this.z[j] - midZ) > minimum + halfZ) continue;
         if (!this.grounded[j]) {
@@ -507,7 +496,7 @@ export class BattleSimulation {
     return true;
   }
 
-  private nearest(i: number, radius: number): number {
+  private nearest(i: number, radius: number, rangeOverride?: number, muzzleY = this.y[i] + 0.7): number {
     this.nearestSlot = -1; this.nearestDistance = radius * radius;
     this.nearestVisible = false; this.candidates.fill(-1); this.candidateDistances.fill(radius * radius);
     const grid = this.grid;
@@ -528,11 +517,11 @@ export class BattleSimulation {
       }
     }
     // Unarmed soldiers (empty inventory) have no gun range, so nothing counts as visible-in-range.
-    const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range;
+    const gunRange = rangeOverride ?? (this.weapon[i] === NO_WEAPON ? 0 : this.weaponFor(this.weapon[i]).range);
     if (this.navigation) for (let n = 0; n < 4; n++) {
       const j = this.candidates[n];
       if (j >= 0 && this.candidateDistances[n] <= gunRange ** 2
-        && this.terrain.visible(x, this.y[i] + 0.7, z, this.x[j], this.y[j] + 0.7, this.z[j])) { this.nearestVisible = true; return j; }
+        && this.terrain.visible(x, muzzleY, z, this.x[j], this.y[j] + 0.7, this.z[j])) { this.nearestVisible = true; return j; }
     }
     return this.nearestSlot;
   }
@@ -541,10 +530,24 @@ export class BattleSimulation {
   damage(id: number, amount: number) {
     const i = this.byId.get(id);
     if (i === undefined || this.hp[i] <= 0 || !Number.isFinite(amount) || amount <= 0) return;
+    this.applySoldierDamage(i, amount * this.armorFactor(i));
+  }
+
+  private armorFactor(i: number) { return this.vehicles.ride[i] >= 0 ? 1 - this.tuning.truckCrewArmor : 1; }
+  queueDamage(i: number, amount: number) { this.pendingDamage[i] += amount * this.armorFactor(i); }
+
+  private applySoldierDamage(i: number, amount: number) {
     this.hp[i] = Math.max(0, this.hp[i] - amount); this.lastHit[i] = this.time;
     this.events.emit(this.hp[i] === 0 ? 'death' : 'hit', this.team[i] as Team, this.x[i], this.time);
     if (this.hp[i] === 0) {
+      this.vehicles.soldierDied(i);
       this.diedAt[i] = this.time; this.target[i] = 0; this.moving[i] = 0;
+      // Pick one casualty from each group before it falls so the fade can start on time.
+      const deathInGroup = this.totalDeaths % CONFIG.corpseRetentionGroup;
+      if (deathInGroup === 0) this.retainedDeathInGroup = Math.floor(this.corpseRng() * CONFIG.corpseRetentionGroup);
+      this.pendingCorpse[i] = Number(deathInGroup === this.retainedDeathInGroup);
+      this.deathFallOffset[i] = (this.corpseRng() * 2 - 1) * Math.PI;
+      this.deathRoll[i] = (this.corpseRng() * 2 - 1) * Math.PI;
       this.grid.remove(i); this.alive[this.team[i]]--; this.totalDeaths++;
     }
   }
@@ -555,18 +558,20 @@ export class BattleSimulation {
     const distance = Math.hypot(this.x[target] - x, this.z[target] - z, this.y[target] - this.y[i]);
     if (distance > gun.range || distance < 1e-8) return false;
     const dx = (this.x[target] - x) / distance, dz = (this.z[target] - z) / distance, dy = (this.y[target] - this.y[i]) / distance;
-    // Cached sight only guides movement. A fresh terrain ray authorizes each shot.
+    // A hit before terrain is valid even when the intended target is behind cover.
     const terrainHit = this.terrain.raycast(x, y, z, dx, dy, dz, distance);
-    if (terrainHit < distance - 1e-5) {
+    const closest = this.directLane(i, x, y, z, dx, dy, dz, terrainHit), hit = this.beamHit, hull = this.hullHit;
+    if (hit < 0 && hull < 0 && terrainHit < distance - 1e-5) {
       this.visible[i] = 0;
       this.nextSearch[i] = Math.min(this.nextSearch[i], this.time);
       return false;
     }
-    const closest = this.castBeam(i, x, y, z, dx, dy, dz, distance), hit = this.beamHit;
     if (hit >= 0 && this.team[hit] === this.team[i]) { this.blockShot(i, hit, dx, dz); return false; }
+    if (hull >= 0 && this.vehicles.team[hull] === this.team[i]) { this.totalBlockedShots++; return false; }
     this.blockedUntil[i] = 0;
     if (this.flankState[i] === 3) this.flankState[i] = 0;
-    if (hit >= 0) this.pendingDamage[hit] += gun.damage;
+    if (hit >= 0) this.queueDamage(hit, gun.damage);
+    else if (hull >= 0) this.vehicles.pendingDamage[hull] += gun.damage;
     this.lastFire[i] = this.time; this.nextFire[i] = this.time + gun.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
     this.aimPitch[i] = Math.atan2(dy, Math.hypot(dx, dz));
@@ -577,10 +582,33 @@ export class BattleSimulation {
   }
 
   private beamHit = -1;
+  private hullHit = -1;
+  private directLane(i: number, x: number, y: number, z: number, dx: number, dy: number, dz: number, distance: number) {
+    const f = this.vehicles, v = f.ride[i];
+    this.hullHit = -1;
+    if (f.count) {
+      distance = f.castHull(x, y, z, dx, dy, dz, distance, v >= 0 ? f.id[v] : 0, this.friendlyBlocking ? -1 : this.team[i]);
+      this.hullHit = f.rayHit;
+    }
+    const closest = this.castBeam(i, x, y, z, dx, dy, dz, distance);
+    if (this.beamHit >= 0) this.hullHit = -1;
+    return closest;
+  }
+
+  /** Checks a planned firing position without changing cooldowns, aim, or damage. */
+  turretLane(i: number, x: number, y: number, z: number, target: number, range: number) {
+    const ax = this.x[target] - x, ay = this.y[target] + 0.7 - y, az = this.z[target] - z, d = Math.hypot(ax, ay, az);
+    if (d < 1e-7 || d > range) return false;
+    const dx = ax / d, dy = ay / d, dz = az / d;
+    const terrain = this.terrain.raycast(x, y, z, dx, dy, dz, d);
+    if (terrain < d - 1e-5) return false;
+    this.directLane(i, x, y, z, dx, dy, dz, terrain);
+    return this.beamHit >= 0 ? this.team[this.beamHit] !== this.team[i] : this.hullHit < 0 || this.vehicles.team[this.hullHit] !== this.team[i];
+  }
   /** First soldier (enemy, or ally while friendly blocking is on) along a ray from shooter i: slot in beamHit, distance returned. */
   private castBeam(i: number, x: number, y: number, z: number, dx: number, dy: number, dz: number, distance: number) {
     let hit = -1, closest = distance;
-    const blocking = this.friendlyBlocking;
+    const blocking = this.friendlyBlocking, ride = this.vehicles.ride, own = ride[i];
     if (++this.beamQuery === 0xffffffff) { this.beamStamp.fill(0); this.beamQuery = 1; }
     // Traverse just the cells crossed by the beam. Neighboring cells account for circle radius.
     let cx = this.grid.column(x), cz = this.grid.row(z);
@@ -596,7 +624,7 @@ export class BattleSimulation {
           const cellIndex = row * this.grid.columns + column;
           if (!this.grid.teamCounts[1 - this.team[i]][cellIndex] && !(blocking && this.grid.teamCounts[this.team[i]][cellIndex])) continue;
           for (let j = this.grid.heads[cellIndex]; j >= 0; j = this.grid.next[j]) {
-            if (j === i || (!blocking && this.team[j] === this.team[i])) continue;
+            if (j === i || own >= 0 && ride[j] === own || (!blocking && this.team[j] === this.team[i])) continue;
             if (this.beamStamp[j] === this.beamQuery) continue;
             this.beamStamp[j] = this.beamQuery;
             const d = rayCapsule(x, y, z, dx, dy, dz, this.x[j], this.y[j], this.z[j], this.radius[j]);
@@ -624,8 +652,9 @@ export class BattleSimulation {
       if (this.terrain.raycast(x, y, z, ax / d, ay / d, az / d, d) >= d - 1e-5) { dx = ax / d; dy = ay / d; dz = az / d; distance = d; }
     }
     if (!distance) { this.visible[i] = 0; this.nextSearch[i] = Math.min(this.nextSearch[i], this.time); return false; }
-    this.castBeam(i, x, y, z, dx, dy, dz, distance);
+    this.directLane(i, x, y, z, dx, dy, dz, distance);
     if (this.beamHit >= 0 && this.team[this.beamHit] === this.team[i]) { this.blockShot(i, this.beamHit, dx, dz); return false; }
+    if (this.hullHit >= 0 && this.vehicles.team[this.hullHit] === this.team[i]) { this.totalBlockedShots++; return false; }
     this.blockedUntil[i] = 0;
     if (this.flankState[i] === 3) this.flankState[i] = 0;
     const muzzle = 0.44, mx = x + dx * muzzle, my = y + dy * muzzle, mz = z + dz * muzzle;
@@ -636,7 +665,8 @@ export class BattleSimulation {
     const exitX = Math.abs(dx) > 1e-9 ? ((dx > 0 ? hw : -hw) - mx) / dx : Infinity;
     const exitZ = Math.abs(dz) > 1e-9 ? ((dz > 0 ? hd : -hd) - mz) / dz : Infinity;
     if (Math.min(exitX, exitZ) < limit) { limit = Math.max(0, Math.min(exitX, exitZ)); detonate = false; }
-    this.rockets.add(mx, my, mz, dx, dy, dz, limit, detonate, this.id[i], this.team[i]);
+    const v = this.vehicles.ride[i];
+    this.rockets.add(mx, my, mz, dx, dy, dz, limit, detonate, this.id[i], this.team[i], v >= 0 ? this.vehicles.id[v] : 0);
     this.inventory[i] &= ~ROCKET_BIT; this.totalRockets++;
     this.lastFire[i] = this.time; this.nextFire[i] = this.time + this.rocket.interval;
     this.facing[i] = Math.atan2(dx, dz); this.totalShots++;
@@ -646,19 +676,24 @@ export class BattleSimulation {
     return true;
   }
 
-  /** Moves every rocket one tick. Soldiers of either team stop it; terrain, fuse and field edge were resolved at launch. */
+  /** Moves every rocket one tick. Hulls and soldiers stop it; terrain, fuse and field edge were resolved at launch. */
   private advanceRockets() {
     const r = this.rockets, stride = this.tuning.rocketSpeed * CONFIG.step, grid = this.grid, reach = this.tuning.radius + 0.01;
     for (let n = 0; n < r.count;) {
       const x = r.x[n], y = r.y[n], z = r.z[n], dx = r.dx[n], dy = r.dy[n], dz = r.dz[n];
       r.previousX[n] = x; r.previousY[n] = y; r.previousZ[n] = z;
       let travel = Math.max(0, Math.min(stride, r.limit[n] - r.travelled[n])), struck = false;
+      const f = this.vehicles, owner = r.ownerVehicle[n];
+      if (f.count) {
+        travel = f.castHull(x, y, z, dx, dy, dz, travel, owner);
+        struck = f.rayHit >= 0;
+      }
       const ex = x + dx * travel, ez = z + dz * travel;
       const minX = grid.column(Math.min(x, ex) - reach), maxX = grid.column(Math.max(x, ex) + reach);
       const minZ = grid.row(Math.min(z, ez) - reach), maxZ = grid.row(Math.max(z, ez) + reach);
       for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
         for (let j = grid.heads[row * grid.columns + col]; j >= 0; j = grid.next[j]) {
-          if (this.id[j] === r.owner[n]) continue;
+          if (this.id[j] === r.owner[n] || owner && f.ride[j] >= 0 && f.id[f.ride[j]] === owner) continue;
           const t = rayCapsule(x, y, z, dx, dy, dz, this.x[j], this.y[j], this.z[j], this.radius[j]);
           if (t <= travel) { travel = t; struck = true; }
         }
@@ -685,7 +720,7 @@ export class BattleSimulation {
   private blockShot(i: number, ally: number, dx: number, dz: number) {
     this.totalBlockedShots++;
     this.blockedUntil[i] = this.time + 0.75;
-    if (!this.grounded[i] || this.flankState[i] === 3 || this.flankBudget <= 0) return;
+    if (!this.vehicles.onFoot(i) || !this.grounded[i] || this.flankState[i] === 3 || this.flankBudget <= 0) return;
     // Step to the side of the ray the ally is not on; personal handedness breaks a dead-centre block.
     const lx = -dz, lz = dx, offset = (this.x[ally] - this.x[i]) * lx + (this.z[ally] - this.z[i]) * lz;
     const preferred = Math.abs(offset) < 0.05 ? this.detourSide[i] : offset > 0 ? -1 : 1;
@@ -700,6 +735,48 @@ export class BattleSimulation {
       this.resetAnchor(i);
       return;
     }
+  }
+
+  private fireTurrets() {
+    const f = this.vehicles, range = f.range;
+    if (range === null || !f.count) return;
+    const started = performance.now();
+    for (let n = 0; n < f.count; n++) {
+      const v = f.active[n], i = f.seat(v, GUNNER);
+      if (i < 0) continue;
+      const gun = VEHICLE_TYPES[f.type[v]].turret, interval = this.tuning[gun.interval];
+      const x = f.x[v] + f.cos[v] * gun.x + f.sin[v] * gun.z;
+      const y = f.y[v] + gun.y, z = f.z[v] - f.sin[v] * gun.x + f.cos[v] * gun.z;
+      let j = this.byId.get(this.target[i]) ?? -1;
+      const valid = j >= 0 && this.hp[j] > 0 && this.team[j] !== this.team[i];
+      if (this.time >= f.nextTurretSearch[v]) {
+        if (!valid || Math.hypot(this.x[j] - x, this.z[j] - z, this.y[j] + 0.7 - y) > range) {
+          j = this.nearest(i, range + 3.5, range, y);
+          this.target[i] = j >= 0 ? this.id[j] : 0;
+        }
+        f.nextTurretSearch[v] = this.time + 0.28 + (f.id[v] % 13) * 0.012;
+      } else if (!valid) j = -1;
+      if (j < 0) continue;
+      const ax = this.x[j] - x, ay = this.y[j] + 0.7 - y, az = this.z[j] - z, d = Math.hypot(ax, ay, az);
+      if (d <= 1e-6) continue;
+      f.turretYaw[v] = this.facing[i] = Math.atan2(ax, az); f.turretPitch[v] = Math.atan2(ay, Math.hypot(ax, az));
+      if (d > range || f.nextTurretShot[v] > this.time) continue;
+      const dx = ax / d, dy = ay / d, dz = az / d, terrain = this.terrain.raycast(x, y, z, dx, dy, dz, d);
+      const hitAt = this.directLane(i, x, y, z, dx, dy, dz, terrain), hit = this.beamHit, hull = this.hullHit;
+      if (hit >= 0 && this.team[hit] === this.team[i] || hull >= 0 && f.team[hull] === this.team[i]
+        || hit < 0 && hull < 0 && terrain < d - 1e-5) {
+        this.target[i] = 0; f.nextTurretShot[v] = this.time + Math.min(0.15, interval);
+        continue;
+      }
+      const muzzle = Math.min(gun.barrel, hitAt);
+      if (hit >= 0) this.queueDamage(hit, this.tuning[gun.damage]);
+      else if (hull >= 0) f.pendingDamage[hull] += this.tuning[gun.damage];
+      this.lastFire[i] = this.time; f.nextTurretShot[v] = this.time + interval;
+      this.totalShots++; f.metrics.shots++;
+      this.events.emit('shot', this.team[i] as Team, x, this.time, gun.effect);
+      this.shots.emit(x + dx * muzzle, z + dz * muzzle, x + dx * hitAt, z + dz * hitAt, this.team[i] as Team, this.time, y + dy * muzzle, y + dy * hitAt, gun.effect);
+    }
+    f.metrics.firingMs += performance.now() - started;
   }
 
   /** O(n) per tick: each army's firing-line frame, from last tick's engaged soldiers (or the whole army before contact). */
@@ -834,15 +911,16 @@ export class BattleSimulation {
   }
 
   /** Positions stay unchanged while commands accumulate, so simultaneous blasts add. Infantry mass = 1. */
-  private explode(e: Explosion) {
+  private explode(e: Explosion, formerCrew?: readonly number[]) {
     if (!validExplosion(e)) { this.rejectedExplosions++; return; }
     const minX = this.grid.column(e.x - e.radius), maxX = this.grid.column(e.x + e.radius);
     const minZ = this.grid.row(e.z - e.radius), maxZ = this.grid.row(e.z + e.radius);
     for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
-      for (let i = this.grid.heads[row * this.grid.columns + col]; i >= 0; i = this.grid.next[i]) this.blastBody(i, e);
+      for (let i = this.grid.heads[row * this.grid.columns + col]; i >= 0; i = this.grid.next[i]) if (!formerCrew?.includes(this.id[i])) this.blastBody(i, e);
     }
     // Corpses leave the combat grid immediately but retain their bounded physical lifetime.
-    for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && this.time - this.diedAt[i] < CONFIG.corpseLifetime) this.blastBody(i, e);
+    for (let i = 0; i < this.used; i++) if (this.hp[i] <= 0 && this.time - this.diedAt[i] < CONFIG.corpseLifetime && !formerCrew?.includes(this.id[i])) this.blastBody(i, e);
+    if (this.vehicles.count && this.result === 'running') this.vehicles.blast(e);
     this.explosions.emit(e, this.time); this.totalExplosions++;
   }
 
@@ -851,10 +929,45 @@ export class BattleSimulation {
     const dx = this.x[i] - e.x, dy = this.y[i] + CONFIG.soldier.height / 2 - e.y, dz = this.z[i] - e.z;
     const d = Math.hypot(dx, dy, dz);
     if (d > e.radius) return;
-    if (this.hp[i] > 0) this.pendingDamage[i] += e.damage;
+    if (this.hp[i] > 0) this.queueDamage(i, e.damage);
+    if (this.vehicles.ride[i] >= 0) return;
     const impulse = e.impulse * Math.max(0, 1 - d / e.radius);
     if (d > 1e-9) { this.velocityX[i] += dx / d * impulse; this.velocityY[i] += dy / d * impulse; this.velocityZ[i] += dz / d * impulse; }
     else this.velocityY[i] += impulse;
+  }
+
+  private wreckBlast(e: Wreck) {
+    for (const id of e.crew) {
+      const i = this.byId.get(id);
+      if (i === undefined) continue;
+      this.vehicles.awaitingEjection[i] = 0; this.grounded[i] = 0;
+      if (this.hp[i] > 0) { this.vehicles.ejected[i] = 1; this.pendingDamage[i] += e.damage; }
+      const dx = this.x[i] - e.x, dz = this.z[i] - e.z, len = Math.hypot(dx, dz);
+      this.velocityX[i] += e.impulse * 0.62 * (len > 1e-6 ? dx / len : Math.sin(e.yaw));
+      this.velocityZ[i] += e.impulse * 0.62 * (len > 1e-6 ? dz / len : Math.cos(e.yaw));
+      this.velocityY[i] += e.impulse * 0.65;
+    }
+    this.explode(e, e.crew);
+  }
+
+  private applyPendingDamage() {
+    const f = this.vehicles;
+    if (f.count) f.applyDamage();
+    for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) {
+      if (this.hp[i] > 0) this.applySoldierDamage(i, this.pendingDamage[i]);
+      this.pendingDamage[i] = 0;
+    }
+  }
+
+  private settleDamage() {
+    const f = this.vehicles;
+    this.applyPendingDamage();
+    let budget = WRECKS_PER_TICK;
+    while (budget && f.pendingDestructions) {
+      const wave = Math.min(budget, f.pendingDestructions);
+      for (let n = 0; n < wave; n++) this.wreckBlast(f.takeWreck());
+      budget -= wave; this.applyPendingDamage();
+    }
   }
 
   /** Swept upright capsules: their Minkowski sum is another vertical capsule. */
@@ -877,13 +990,18 @@ export class BattleSimulation {
         this.velocityX[i] = this.velocityZ[i] = 0;
         continue;
       }
+      const fleet = this.vehicles;
+      if (fleet.count && this.hp[i] > 0) {
+        const hull = fleet.ground.sweepFoot(x, y, z, dx, dy, dz, distance, r);
+        if (hull < distance) { distance = hull; nx = fleet.ground.footNX; ny = fleet.ground.footNY; nz = fleet.ground.footNZ; }
+      }
       if (this.hp[i] > 0) {
         const reach = r + this.tuning.radius + 0.002, ex = x + dx * distance, ez = z + dz * distance;
         const minX = this.grid.column(Math.min(x, ex) - reach), maxX = this.grid.column(Math.max(x, ex) + reach);
         const minZ = this.grid.row(Math.min(z, ez) - reach), maxZ = this.grid.row(Math.max(z, ez) + reach);
         for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++) {
           for (let j = this.grid.heads[row * this.grid.columns + col]; j >= 0; j = this.grid.next[j]) {
-            if (j === i) continue;
+            if (j === i || !fleet.onFoot(j)) continue;
             this.collisionChecks++;
             const axial = height - r - this.radius[j], radius = r + this.radius[j] + 0.001;
             const low = this.y[j] - axial, high = this.y[j] + axial;
@@ -912,11 +1030,27 @@ export class BattleSimulation {
     }
   }
 
+  private archiveCorpse(i: number) {
+    if (!this.pendingCorpse[i]) return;
+    this.pendingCorpse[i] = 0;
+    this.retiredCorpses[this.retiredCorpseCount++ % CONFIG.retainedCorpses] = {
+      id: this.id[i], at: this.diedAt[i] + CONFIG.corpseLifetime,
+      x: this.x[i], y: this.y[i], z: this.z[i], velocityY: this.velocityY[i],
+      yaw: this.facing[i], fallOffset: this.deathFallOffset[i], roll: this.deathRoll[i],
+      aimPitch: this.aimPitch[i], radius: this.radius[i],
+      team: this.team[i] as Team, weapon: this.weapon[i],
+    };
+  }
+
   private integrateBodies() {
     this.activeBodies = this.airborne = 0;
     for (let n = 0; n < this.used; n++) {
       const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
-      if (this.hp[i] <= 0 && this.time - this.diedAt[i] >= CONFIG.corpseLifetime) continue;
+      if (!this.vehicles.onFoot(i)) continue;
+      if (this.hp[i] <= 0 && this.time - this.diedAt[i] >= CONFIG.corpseLifetime) {
+        this.archiveCorpse(i);
+        continue;
+      }
       const ground = this.terrain.heightAt(this.x[i], this.z[i]);
       if (this.y[i] <= ground + 1e-5 && this.velocityY[i] <= 0) { this.y[i] = ground; this.velocityY[i] = 0; this.grounded[i] = 1; }
       else { this.grounded[i] = 0; this.velocityY[i] -= this.tuning.gravity * CONFIG.step; }
@@ -934,20 +1068,24 @@ export class BattleSimulation {
         if (this.hp[i] > 0) this.lastProgress[i] = this.time;
       }
       if (!this.grounded[i]) this.airborne++;
+      else this.vehicles.ejected[i] = 0;
     }
   }
 
   step() {
+    const fleet = this.vehicles;
     this.pendingDamage.fill(0, 0, this.used);
     this.explosionCandidates = this.collisionChecks = 0;
     this.time += CONFIG.step; this.tick++;
-    this.updateNavigation();
+    fleet.savePrevious();
     this.centerX.fill(0); this.centerZ.fill(0);
     for (let i = 0; i < this.used; i++) {
       this.previousX[i] = this.x[i]; this.previousY[i] = this.y[i]; this.previousZ[i] = this.z[i]; this.moving[i] = 0;
       if (this.hp[i] > 0) { this.centerX[this.team[i]] += this.x[i]; this.centerZ[this.team[i]] += this.z[i]; }
     }
     this.applyCommands();
+    fleet.place(true);
+    this.updateNavigation();
     this.integrateBodies();
     // Rockets already in flight keep flying after the result; their blasts then only move bodies.
     if (this.result !== 'running') { this.advanceRockets(); return; }
@@ -959,6 +1097,7 @@ export class BattleSimulation {
     for (let n = 0; n < this.used; n++) {
       const i = (this.tick + (this.tick % 2 ? n : this.used - 1 - n)) % this.used;
       if (this.hp[i] <= 0) continue;
+      if (fleet.awaitingEjection[i] || fleet.ejected[i] || fleet.ride[i] >= 0 && fleet.role[i] !== PASSENGER) continue;
       let target = this.byId.get(this.target[i]) ?? -1;
       const range = this.longestRange(i);
       const distance = target >= 0 ? Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]) : Infinity;
@@ -992,8 +1131,10 @@ export class BattleSimulation {
       // Fire whatever reaches (above), but keep closing until the best weapon carried can fire.
       const gunRange = this.weapon[i] === NO_WEAPON ? 0 : this.preferredRange(i);
       if (d > 0.001) this.facing[i] = Math.atan2(dx, dz);
+      if (fleet.ride[i] >= 0) continue;
       // Airborne soldiers can still aim and fire, but cannot walk until they land.
       if (!this.grounded[i]) { this.holdFlank(i, 0); continue; }
+      if (fleet.reservedVehicle[i] >= 0) { this.seekTruck(i, fleet.reservedVehicle[i]); continue; }
       const inRange = gunRange > 0 && target >= 0 && (!this.navigation || this.visible[i]) && reach <= gunRange - 0.12;
       const blocked = this.time < this.blockedUntil[i];
       const engage = inRange && !blocked;
@@ -1020,7 +1161,7 @@ export class BattleSimulation {
         const minZ = this.grid.row(this.z[i] - reach), maxZ = this.grid.row(this.z[i] + reach);
         for (let row = minZ; row <= maxZ; row++) for (let column = minX; column <= maxX; column++) {
           for (let j = this.grid.heads[row * this.grid.columns + column]; j >= 0; j = this.grid.next[j]) {
-            if (j === i) continue;
+            if (j === i || !fleet.onFoot(j)) continue;
             if (!this.grounded[j] && Math.abs(this.y[i] - this.y[j]) >= CONFIG.soldier.height) continue;
             const ox = this.x[i] - this.x[j], oz = this.z[i] - this.z[j], dd = Math.hypot(ox, oz);
             if (dd > 1e-6 && dd < reach) { const force = (reach - dd) / reach * this.tuning.avoidanceStrength; separationX += ox / dd * force; separationZ += oz / dd * force; }
@@ -1043,8 +1184,10 @@ export class BattleSimulation {
       if (moved) this.moving[i] = 1;
       else if (this.tuning.moveRetryDelay > 0) this.moveRetryAt[i] = this.time + this.tuning.moveRetryDelay * (0.5 + this.aiRng());
     }
+    if (this.alive[0] && this.alive[1]) fleet.step();
     if (this.weaponsEnabled) for (let i = 0; i < this.used; i++) {
       if (this.hp[i] <= 0) continue;
+      if (fleet.awaitingEjection[i] || fleet.ejected[i] || fleet.ride[i] >= 0 && fleet.role[i] !== PASSENGER) continue;
       const target = this.byId.get(this.target[i]);
       // Re-evaluate after movement so the gun fired always matches the resolved range.
       this.weapon[i] = this.selectWeapon(i, target === undefined ? Infinity : Math.hypot(this.x[target] - this.x[i], this.z[target] - this.z[i], this.y[target] - this.y[i]));
@@ -1057,16 +1200,39 @@ export class BattleSimulation {
       const interval = this.weaponFor(this.weapon[i]).interval;
       this.nextFire[i] += (Math.floor((this.time - this.nextFire[i]) / interval) + 1) * interval;
     }
+    if (this.weaponsEnabled && fleet.count) this.fireTurrets();
     // After firing, so a rocket that lands this tick adds its blast to the same simultaneous damage pass.
     this.advanceRockets();
-    for (let i = 0; i < this.used; i++) if (this.pendingDamage[i] > 0) this.damage(this.id[i], this.pendingDamage[i]);
-    if (!this.alive[0] || !this.alive[1]) { this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids'; this.endedAt = this.time; }
+    this.settleDamage();
+    if ((!this.alive[0] || !this.alive[1]) && !fleet.pendingDestructions) {
+      this.result = !this.alive[0] && !this.alive[1] ? 'draw' : this.alive[0] ? 'plutonians' : 'sectoids';
+      this.endedAt = this.time; fleet.place();
+    }
   }
 
-  private applyCommands() {
+  private seekTruck(i: number, v: number) {
+    const f = this.vehicles, ox = this.x[i], oz = this.z[i], dx = f.x[v] - ox, dz = f.z[v] - oz;
+    const distance = Math.hypot(dx, dz);
+    this.holdFlank(i, 0);
+    if (distance <= 1.1 + this.radius[i]) return;
+    const stride = Math.min(distance, this.tuning.speed * CONFIG.step), sx = dx / distance * stride, sz = dz / distance * stride;
+    let moved = this.safeMove(i, ox + sx, oz + sz);
+    for (let n = 0; n < 6 && !moved; n++) {
+      const c = this.detourCos[n], s = this.detourSin[n] * this.detourSide[i];
+      moved = this.safeMove(i, ox + sx * c - sz * s, oz + sx * s + sz * c);
+    }
+    this.moving[i] = +moved;
+  }
+
+  private applyCommands(combat = true) {
+    let deferred = 0;
     for (const command of this.commands) {
       if (command.type === 'spawn') { if (this.spawn(command.team, command.x, command.z, command.weapon) === null) this.rejectedSpawns++; }
-      else if (command.type === 'explode') { if (this.result === 'running') this.explode(command); }
+      else if (command.type === 'explode') {
+        if (!combat) this.commands[deferred++] = command;
+        else if (this.result === 'running') this.explode(command);
+      }
+      else if (command.type === 'deployTrucks') { if (this.result === 'running') this.vehicles.paint(command.x, command.z, command.radius, command.teams, command.solo); }
       else if (!WEAPONS[command.weapon]) continue;
       else if (command.type === 'equip') for (const id of command.ids) {
         const i = this.byId.get(id);
@@ -1081,6 +1247,6 @@ export class BattleSimulation {
         for (let i = 0; i < this.used; i++) if (this.inArea(i, command.team, command.x, command.z, command.radius)) this.upgradeSlot(i, command.weapon);
       }
     }
-    this.commands.length = 0;
+    this.commands.length = deferred;
   }
 }

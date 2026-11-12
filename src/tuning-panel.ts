@@ -1,4 +1,4 @@
-import { DEFAULT_TUNING, TUNING, deploymentError, validValue, type TuningKey, type TuningValues } from './tuning.ts';
+import { DEFAULT_TUNING, TUNING, TURRET_RANGE_ERROR, deploymentError, effectiveTurretRange, validValue, type TuningKey, type TuningValues } from './tuning.ts';
 import { readSetting, writeSetting } from './settings-store.ts';
 
 const SHORT_NAMES: Record<string, string> = {
@@ -50,10 +50,12 @@ export class TuningPanel {
     const control = (def: (typeof TUNING)[number]) => `
       <div class="tuning-control${def.key === 'seed' ? ' no-range' : ''}" data-control="${def.key}" data-group="${this.groups.indexOf(def.group)}" title="${def.help}">
         <label for="tune-${def.key}">${def.label}${def.restart ? '<span class="tuning-restart" title="Applies when a new battle starts" aria-label="applies on new battle">↻</span>' : ''}</label>
-        ${def.key !== 'seed' ? `<input type="range" data-tuning-range="${def.key}" aria-label="${def.label} slider" min="${def.min}" max="${def.max}" step="${def.step}" value="${values[def.key]}"/>` : ''}
-        <div class="tuning-number"><input id="tune-${def.key}" data-tuning-key="${def.key}" aria-describedby="help-${def.key}" type="number" min="${def.min}" max="${def.max}" step="any" ${def.step === 1 ? 'inputmode="numeric"' : 'inputmode="decimal"'} value="${values[def.key]}"/>${def.unit ? `<span>${def.unit}</span>` : ''}</div>
+        ${def.checkbox ? `<input id="tune-${def.key}" data-tuning-key="${def.key}" aria-describedby="help-${def.key}" type="checkbox" ${values[def.key] ? 'checked' : ''}/>` : `
+          ${def.key !== 'seed' ? `<input type="range" data-tuning-range="${def.key}" aria-label="${def.label} slider" min="${def.min}" max="${def.max}" step="${def.step}" value="${values[def.key]}"/>` : ''}
+          <div class="tuning-number"><input id="tune-${def.key}" data-tuning-key="${def.key}" aria-describedby="help-${def.key}" type="number" min="${def.min}" max="${def.max}" step="any" ${def.step === 1 ? 'inputmode="numeric"' : 'inputmode="decimal"'} value="${values[def.key]}"/>${def.unit ? `<span>${def.unit}</span>` : ''}</div>`}
         <button type="button" class="tuning-reset-one" data-reset="${def.key}" title="Reset to default (${DEFAULT_TUNING[def.key]})" aria-label="Reset ${def.label}">↺</button>
         <p id="help-${def.key}">${def.help}</p>
+        ${def.key === 'turretRangePosition' ? '<output class="turret-range" for="tune-turretRangePosition tune-range tune-rocketRange"></output>' : ''}
       </div>`;
     host.insertAdjacentHTML('beforeend', `
       <button id="tuning-toggle" class="tuning-toggle" aria-label="Battle tuning" aria-expanded="false" aria-controls="tuning-panel" title="Battle tuning (T)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 5h14M3 10h14M3 15h14"/><path d="M7 2v6m6-1v6m-5-1v6" stroke-width="3"/></svg><span>Tuning</span><small>${TUNING.length}</small><span class="tuning-chevron">⌄</span></button>
@@ -107,7 +109,7 @@ export class TuningPanel {
       const input = event.target as HTMLInputElement;
       const key = (input.dataset.tuningKey ?? input.dataset.tuningRange) as TuningKey | undefined;
       if (!key) return;
-      const value = input.value === '' ? NaN : Number(input.value);
+      const value = input.type === 'checkbox' ? Number(input.checked) : input.valueAsNumber;
       if (!validValue(key, value)) { input.setAttribute('aria-invalid', 'true'); this.status.textContent = 'Enter a value within the control’s limits.'; this.status.classList.add('tuning-error'); this.apply.disabled = true; return; }
       input.removeAttribute('aria-invalid'); this.values[key] = value; this.change({ ...this.values }); this.refresh();
     });
@@ -163,9 +165,10 @@ export class TuningPanel {
   private refresh() {
     const changedGroups = new Set<string>(), pendingGroups = new Set<string>();
     for (const def of TUNING) {
-      const number = this.element.querySelector<HTMLInputElement>(`[data-tuning-key="${def.key}"]`)!;
+      const input = this.element.querySelector<HTMLInputElement>(`[data-tuning-key="${def.key}"]`)!;
       const range = this.element.querySelector<HTMLInputElement>(`[data-tuning-range="${def.key}"]`);
-      if (document.activeElement !== number) { number.value = String(this.values[def.key]); number.removeAttribute('aria-invalid'); }
+      if (def.checkbox) input.checked = this.values[def.key] === 1;
+      else if (document.activeElement !== input) { input.value = String(this.values[def.key]); input.removeAttribute('aria-invalid'); }
       if (range) range.value = String(this.values[def.key]);
       const changed = this.values[def.key] !== DEFAULT_TUNING[def.key];
       if (changed) changedGroups.add(def.group);
@@ -182,9 +185,13 @@ export class TuningPanel {
       tab.classList.toggle('changed', page.changed()); tab.classList.toggle('pending', pagePending[i]);
     });
     const error = deploymentError(this.values) ?? this.pages.map(page => page.error()).find(Boolean) ?? null;
+    const range = effectiveTurretRange(this.active), conflict = effectiveTurretRange(this.values) === null;
+    this.element.querySelector('.turret-range')!.textContent = range === null ? 'Turret range unavailable'
+      : `Effective range: ${range.toFixed(2)} u`;
     const pending = pendingGroups.size > 0 || pagePending.includes(true);
-    this.status.classList.toggle('tuning-error', !!error); this.apply.disabled = !!error;
-    this.status.textContent = error ?? (pending ? 'Deployment changes ready. Start a new battle to apply.' : IDLE_STATUS);
+    this.status.classList.toggle('tuning-error', !!error || conflict); this.apply.disabled = !!error;
+    this.status.textContent = error ?? (conflict ? TURRET_RANGE_ERROR + (range === null ? '' : ' Live ranges are unchanged.')
+      : pending ? 'Deployment changes ready. Start a new battle to apply.' : IDLE_STATUS);
     this.toggleButton.classList.toggle('has-pending', pending);
   }
 }

@@ -30,3 +30,15 @@ export function rayCapsule(x: number, y: number, z: number, dx: number, dy: numb
   cx: number, base: number, cz: number, radius: number) {
   return raySegmentCapsule(x, y, z, dx, dy, dz, cx, base + radius, base + CONFIG.soldier.height - radius, cz, radius);
 }
+
+/** First distance along a unit direction to a circle. */
+export function rayCircle(x: number, z: number, dx: number, dz: number, cx: number, cz: number, radius: number): number {
+  const ox = x - cx, oz = z - cz, b = ox * dx + oz * dz;
+  const c = ox * ox + oz * oz - radius * radius;
+  if (c <= 0) return 0;
+  if (b >= 0) return Infinity;
+  const d = b * b - c;
+  if (d < 0) return Infinity;
+  const t = -b - Math.sqrt(d);
+  return t >= 0 ? t : Infinity;
+}

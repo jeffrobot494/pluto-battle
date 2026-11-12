@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
+    "build:browser-fixture": "vite build --mode browser-test --outDir artifacts/browser-build",
     "deploy": "npm run build && rundot deploy",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --experimental-strip-types --no-warnings --test tests/*.test.ts",
@@ -25,6 +26,8 @@
     "test:explosions:browser": "node scripts/explosion-smoke.mjs",
     "test:upgrades:browser": "node scripts/upgrade-smoke.mjs",
     "benchmark:explosions": "node scripts/explosion-benchmark.mjs",
+    "benchmark:vehicles": "node scripts/vehicle-benchmark.mjs",
+    "debug:trucks": "node --experimental-strip-types --no-warnings scripts/truck-trace.mjs",
     "benchmark:simulation": "node --experimental-strip-types --no-warnings scripts/simulation-benchmark.mjs"
   },
   "dependencies": {

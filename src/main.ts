@@ -5,7 +5,7 @@ import './style.css';
 import { CONFIG } from './config.ts';
 import { BattleSimulation } from './simulation.ts';
 import { BattleRenderer } from './renderer.ts';
-import { loadTuning, saveTuning, deploymentError } from './tuning.ts';
+import { loadTuning, saveTuning, deploymentError, effectiveTurretRange, TURRET_RANGE_ERROR } from './tuning.ts';
 import { TuningPanel } from './tuning-panel.ts';
 import { BattleAudio, SOUND_EFFECTS } from './audio.ts';
 import { copyEquipment, loadEquipment, saveEquipment, validateEquipment, type EquipmentSettings } from './equipment.ts';
@@ -13,6 +13,9 @@ import { EquipmentTab } from './equipment-panel.ts';
 import { prepareTerrain } from './navigation.ts';
 import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
+import type { TruckTraceReport } from './truck-trace.ts';
+import { serializeTruckTrace } from './truck-trace-export.ts';
+import { BENCHMARK_SCENARIOS, VehicleBenchmark, benchmarkTuning, usesTrucks, type BenchmarkScenario } from './vehicle-benchmark.ts';
 import { BattleInput, type GroundPoint } from './battle-input.ts';
 import { UpgradeMenu } from './upgrade-menu.ts';
 import { SoldierCard } from './soldier-card.ts';
@@ -63,7 +66,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </nav>
       <button id="diagnostics-toggle" class="performance-badge" aria-expanded="false" aria-controls="diagnostics" title="Performance and battle settings (D)">${icons.stats}<strong id="fps-label">—</strong><span>FPS</span></button>
     </footer>
-    <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1 / 2 / 3 UPGRADE <span>·</span> S ARMY</div>
+    <div class="input-hint">TAP SELECT <span>·</span> HOLD ZONE <span>·</span> DRAG PAN <span>·</span> RIGHT-DRAG ORBIT <span>·</span> SCROLL / PINCH ZOOM <span>·</span> 1–4 UPGRADE <span>·</span> S ARMY</div>
     <details id="sound-panel" class="sound-panel">
       <summary>${icons.sound}<span>Sound effects</span><span id="sound-state">TAP TO ENABLE</span><span class="sound-chevron" aria-hidden="true">⌃</span></summary>
       <div class="sound-settings">
@@ -75,9 +78,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <aside id="diagnostics" hidden aria-label="Performance and battle settings">
       <div class="panel-heading"><span>FIELD DIAGNOSTICS</span><button id="close-diagnostics" aria-label="Close diagnostics">×</button></div>
       <dl id="metrics"></dl>
+      <div class="settings truck-trace-actions"><button id="truck-trace-toggle">Record trucks</button><button id="truck-trace-save" disabled>Save truck trace</button><button id="truck-trace-save-full" disabled>Save full trace</button></div>
+      <p id="truck-trace-status" role="status">Record driving decisions and flag trucks that stop for 2 seconds.</p>
       <div class="settings"><label for="deployment">Deployment preset <select id="deployment"><option value="custom" disabled>Custom · tuning panel</option><option value="100">100 vs 100</option><option value="250">250 vs 250</option><option value="500">500 vs 500</option></select></label><label for="quality">Visual quality <select id="quality"><option value="balanced">Adaptive · up to 1.5× pixels</option><option value="low">Low · up to 1× pixels</option></select></label><button id="apply-battle">Deploy preset ${icons.restart}</button></div>
       <p>Restart replays this map; New map (N) rolls a different landscape. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
-      <div class="settings"><button id="benchmark-start">Benchmark 500 vs 500 · 15 min</button><button id="benchmark-save" disabled>Save benchmark report</button></div>
+      <div class="settings"><label for="benchmark-scenario">Benchmark workload <select id="benchmark-scenario">${BENCHMARK_SCENARIOS.map(({ id, label }) => `<option value="${id}">${label}</option>`).join('')}</select></label><button id="benchmark-start">Benchmark 500 vs 500 · 15 min</button><button id="benchmark-save" disabled>Save benchmark report</button></div>
       <p id="benchmark-status" role="status">5-minute warmup, then 10-minute recording. Keep the page visible.</p>
       <div class="settings"><button id="replay-watch-last">Watch last replay</button><button id="replay-save">Save replay file</button><button id="replay-load-button">Load replay file</button><input id="replay-load" type="file" accept=".json,application/json" hidden></div>
       <p id="replay-status" role="status">Every battle is recorded. Replays play back on this device only (prototype).</p>
@@ -188,7 +193,7 @@ function updateZone(now: number) {
 }
 
 /** Gives `upgrade` to the target army's soldiers in the zone; returns how many gained a new weapon. */
-function upgradeArea(upgrade: Upgrade, point: { x: number; z: number }, radius: number, target: UpgradeTarget = upgradeMenu.target) {
+function upgradeArea(upgrade: Extract<Upgrade, { kind: 'weapon' }>, point: { x: number; z: number }, radius: number, target: UpgradeTarget = upgradeMenu.target) {
   if (sim.result !== 'running') return 0;
   let count = 0;
   for (const team of target.teams) {
@@ -198,7 +203,7 @@ function upgradeArea(upgrade: Upgrade, point: { x: number; z: number }, radius: 
   if (paused) { sim.flushCommands(); soldierCard.update(sim); }
   return count;
 }
-function upgradeSoldier(upgrade: Upgrade, id: number) {
+function upgradeSoldier(upgrade: Extract<Upgrade, { kind: 'weapon' }>, id: number) {
   const i = sim.byId.get(id);
   if (i === undefined || sim.result !== 'running' || sim.hp[i] <= 0) return false;
   const gained = !(sim.inventory[i] & (1 << upgrade.weapon));
@@ -206,18 +211,41 @@ function upgradeSoldier(upgrade: Upgrade, id: number) {
   if (paused) sim.flushCommands();
   return gained;
 }
+let deploymentRevision = 0;
+function showDeploymentReport() {
+  if (deploymentRevision === sim.vehicles.deploymentRevision) return;
+  deploymentRevision = sim.vehicles.deploymentRevision;
+  const report = sim.vehicles.lastDeployment!;
+  upgradeMenu.say(report.selected ? `Truck deployment: ${report.boarded} boarded · ${report.onFoot} still on foot`
+    : 'No available soldiers in the painted zone', 6);
+}
+function deployTrucks(point: { x: number; z: number }, radius: number, target = upgradeMenu.target) {
+  if (sim.result !== 'running') return false;
+  if (effectiveTurretRange(tuning) === null || sim.vehicles.range === null) { upgradeMenu.say(TURRET_RANGE_ERROR, 7); return false; }
+  const teams = target.teams.reduce<number>((mask, team) => mask | (1 << team), 0);
+  upgradeMenu.say(paused ? 'Placing trucks · waiting crews retry on resume' : 'Placing trucks…', 12);
+  sim.queue({ type: 'deployTrucks', teams, x: point.x, z: point.z, radius });
+  if (paused) { sim.flushCommands(); showDeploymentReport(); }
+  return true;
+}
 function selectSoldier(id: number) {
-  renderer.selectedId = id; soldierCard.show(id); soldierCard.update(sim); soldierCard.position(sim, renderer);
+  renderer.selectedId = id; renderer.selectedVehicleId = 0; soldierCard.show(id); soldierCard.update(sim); soldierCard.position(sim, renderer);
+}
+function selectVehicle(id: number) {
+  renderer.selectedId = 0; renderer.selectedVehicleId = id; soldierCard.show(0, id); soldierCard.update(sim); soldierCard.position(sim, renderer);
 }
 function onTap(clientX: number, clientY: number) {
   if (explosionTesting) {
     if (canDetonate()) { const point = renderer.pickGround(clientX, clientY, sim); if (point) explode(point); }
     return;
   }
+  const truck = renderer.pickVehicle(clientX, clientY, sim);
+  if (truck >= 0) { selectVehicle(sim.vehicles.id[truck]); return; }
   const slot = renderer.pickSoldier(clientX, clientY, sim);
   if (slot < 0) { selectSoldier(0); return; }
   const id = sim.id[slot], upgrade = upgradeMenu.selected;
-  if (upgrade && sim.hp[slot] > 0) {
+  if (upgrade?.kind === 'vehicle') upgradeMenu.say(effectiveTurretRange(tuning) === null ? TURRET_RANGE_ERROR : 'Hold the battlefield to paint a truck crew.');
+  if (upgrade?.kind === 'weapon' && sim.hp[slot] > 0) {
     if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
     else upgradeMenu.say(upgradeSoldier(upgrade, id) ? `Soldier #${id} → ${upgrade.name}` : `Soldier #${id} already carries a ${upgrade.name.toLowerCase()}`);
   }
@@ -233,6 +261,7 @@ const input = new BattleInput(renderer.webgl.domElement, {
     zone.radius = zoneRadius((now - zone.start) / 1000, maxZoneRadius()); zone.color = zoneColor();
     if (commit && upgrade) {
       if (sim.result !== 'running') upgradeMenu.say('Battle ended · start a new battle to upgrade');
+      else if (upgrade.kind === 'vehicle') deployTrucks(zone.point, zone.radius);
       else { const count = upgradeArea(upgrade, zone.point, zone.radius); upgradeMenu.say(count ? `${count} soldier${count === 1 ? '' : 's'} → ${upgrade.name}` : `No ${upgradeMenu.target.id === 'both' ? 'soldiers' : upgradeMenu.target.name} in range without a ${upgrade.name.toLowerCase()}`); }
     }
     // A canceled hold just disappears; a released one fades out.
@@ -246,6 +275,7 @@ const upgradeMenu = new UpgradeMenu($('#battle-app'), upgrade => {
   renderer.webgl.domElement.classList.toggle('upgrade-cursor', !!upgrade);
   if (zone && !zone.released) zone.color = zoneColor();
 });
+upgradeMenu.setTruckRange(sim.vehicles.range);
 const soldierCard = new SoldierCard($('#battle-app'), () => selectSoldier(0), id => battleRoster.soldier(id));
 const soldierList = new SoldierList($('#battle-app'), id => selectSoldier(id));
 function resetRoster() {
@@ -273,6 +303,8 @@ const intervals = new Float32Array(360), samples: number[] = [];
 let intervalCursor = 0, intervalCount = 0;
 let droppedSimulationSeconds = 0;
 const capture = new PerformanceCapture(status => { $('#benchmark-status').textContent = status; $<HTMLButtonElement>('#benchmark-save').disabled = !capture.report; $('#benchmark-start').textContent = capture.active ? 'Stop benchmark' : 'Benchmark 500 vs 500 · 15 min'; });
+let benchmarkFixture: VehicleBenchmark | null = null;
+let savedTruckTrace: TruckTraceReport | null = null;
 let simulationHz = 0, hzTime = 0, hzTicks = 0;
 const plutoCount = $('#pluto-count'), sectoidCount = $('#sectoid-count'), battleTime = $('#battle-time');
 const plutoStrength = $('#pluto-strength'), sectoidStrength = $('#sectoid-strength');
@@ -293,7 +325,7 @@ function setPaused(value: boolean) {
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
-function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, replay?: Replay) {
+function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, benchmark?: BenchmarkScenario, replay?: Replay) {
   if (!replay && replayBackup) endReplayMode();
   if (!replay && equipmentTab && !equipmentTab.valid) { tuningPanel.showPage(equipmentTab.id); return false; }
   stopBenchmark('Benchmark stopped: new battle.');
@@ -302,16 +334,18 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, re
     replayBackup ??= { tuning: { ...tuning }, equipment: copyEquipment(equipment) };
     tuning = { ...replay.header.tuning }; equipment = copyEquipment(replay.header.equipment);
   }
-  const candidate = { ...tuning };
+  const candidate = benchmark ? benchmarkTuning(tuning, benchmark) : { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
-  tuning = candidate;
+  if (!benchmark) tuning = candidate;
   if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); tuningPanel.toggle(true); return false; }
-  perTeam = tuning.count; seed = tuning.seed;
+  perTeam = candidate.count; seed = candidate.seed;
   terrainSeed = replay ? replay.header.terrainSeed : nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
-  prepared = (replay ? replay.header.flat : flatFixture) ? null : prepareTerrain(tuning, terrainSeed, replay ? replay.header.archetype : forcedArchetype);
+  prepared = (replay ? replay.header.flat : flatFixture) ? null : prepareTerrain(candidate, terrainSeed, replay ? replay.header.archetype : forcedArchetype);
+  stopTruckTrace();
   flushRoster();
-  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
+  sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, candidate, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
+  deploymentRevision = 0; upgradeMenu.setTruckRange(sim.vehicles.range);
   battleRoster = new BattleRoster(replay ? replayRoster(replay) : roster, sim); soldiersTab?.refresh();
   if (replay) beginReplayMode(replay); else startRecording();
   setExplosionTesting(false);
@@ -343,7 +377,7 @@ function watchReplay(replay?: Replay) {
   if (!player) finishRecording();
   const chosen = replay ?? player?.replay ?? lastReplay;
   if (!chosen) { $('#replay-status').textContent = 'No replay yet. Play a battle first.'; return false; }
-  return restart(undefined, chosen.header.seed, chosen.header.terrainSeed, chosen);
+  return restart(undefined, chosen.header.seed, chosen.header.terrainSeed, undefined, chosen);
 }
 function showReplayTap(tap: Extract<ReplayEvent, { kind: 'tap' }>) {
   if (tap.x === undefined || tap.y === undefined) { $('#replay-key').textContent = tap.label; return; }
@@ -397,10 +431,13 @@ function performanceSnapshot() {
     simulationHz, tick: sim.tick, airborne: sim.airborne, activeBodies: sim.activeBodies,
     explosionCandidates: sim.explosionCandidates, collisionChecks: sim.collisionChecks,
     explosions: sim.totalExplosions, activeExplosions: renderer.activeExplosions, overwrittenExplosionEffects: sim.explosions.overwritten,
+    trucks: sim.vehicles.count, pendingCrews: sim.vehicles.pendingCrews, vehicleWork: { ...sim.vehicles.metrics },
   };
 }
 
 function updateHud() {
+  if (sim.result !== 'running' && sim.vehicles.trace) stopTruckTrace();
+  if (!capture.active) showDeploymentReport();
   // Deaths reset levels at once (in memory); the roster is saved when the battle ends or is left.
   const died = battleRoster.recordDeaths() > 0, ended = battleRoster.recordOutcome();
   if (died || ended) { rosterDirty = true; soldiersTab?.refresh(); }
@@ -422,6 +459,7 @@ function updateHud() {
   const stats = performanceSnapshot(); $('#fps-label').textContent = stats.fps ? String(Math.round(stats.fps)) : '—';
   $('#diagnostics-toggle').classList.toggle('slow', stats.fps > 0 && stats.fps < 50);
   if (!$('#diagnostics').hidden) {
+    updateTruckTraceControls();
     const entries = [
       ['Frame p95 / p99', `${stats.p95.toFixed(1)} / ${stats.p99.toFixed(1)} ms`],
       ['Simulation / frame', `${stats.simMs.toFixed(2)} ms`], ['Render submission', `${stats.renderMs.toFixed(2)} ms`],
@@ -436,6 +474,9 @@ function updateHud() {
       ['Navigation nodes / pending', `${stats.navigationExpansions} / ${stats.navigationPending}`],
       ['Render scale / lost sim time', `${Math.round(stats.renderScale * 100)}% / ${stats.droppedSimulationSeconds.toFixed(2)}s`],
       ['Blocked > 2 seconds', `${stats.blockedUnits}`],
+      ['Trucks / crews waiting', `${stats.trucks} / ${stats.pendingCrews}`],
+      ['Truck decisions / longest wait', `${stats.vehicleWork.decisions} / ${(stats.vehicleWork.maxQueueDelay * 1000).toFixed(0)} ms`],
+      ['Truck contacts / rams', `${stats.vehicleWork.contacts} / ${stats.vehicleWork.rams}`],
     ];
     $('#metrics').innerHTML = entries.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
   }
@@ -451,14 +492,18 @@ $('#zoom-out').addEventListener('click', () => renderer.zoom(1 / 1.2));
 $('#diagnostics-toggle').addEventListener('click', () => toggleDiagnostics());
 $('#close-diagnostics').addEventListener('click', () => toggleDiagnostics(false));
 $('#quality').addEventListener('change', () => renderer.setQuality($('#quality') instanceof HTMLSelectElement && $<HTMLSelectElement>('#quality').value === 'low' ? 'low' : 'balanced'));
-function startBenchmark(warmup = 300, duration = 600) {
-  if (!restart(500)) return false;
+function startBenchmark(warmup = 300, duration = 600, scenario: BenchmarkScenario = 'infantry') {
+  if (!BENCHMARK_SCENARIOS.some(({ id }) => id === scenario)) return false;
+  if (usesTrucks(scenario) && effectiveTurretRange(tuning) === null) { $('#benchmark-status').textContent = TURRET_RANGE_ERROR; return false; }
+  if (!restart(undefined, seed, terrainSeed, scenario)) return false;
   recorder = null; // Benchmarks write health directly, which a replay cannot reproduce.
   sim.hp.fill(1e8, 0, sim.used);
-  capture.start(terrainSeed, seed, sim.tuning, warmup, duration);
+  benchmarkFixture = new VehicleBenchmark(scenario);
+  capture.start(terrainSeed, seed, sim.tuning, warmup, duration, scenario);
   $('#benchmark-start').textContent = 'Stop benchmark'; return true;
 }
 function finishBenchmark() {
+  benchmarkFixture = null;
   sim.weaponsEnabled = true;
   for (let i = 0; i < sim.used; i++) sim.hp[i] = Math.min(sim.hp[i], sim.tuning.health);
   $('#benchmark-start').textContent = 'Benchmark 500 vs 500 · 15 min';
@@ -467,12 +512,18 @@ function finishBenchmark() {
 function stopBenchmark(reason?: string) { if (capture.active) { capture.cancel(reason); finishBenchmark(); } }
 $('#benchmark-start').addEventListener('click', () => {
   if (capture.active) stopBenchmark();
-  else startBenchmark();
+  else startBenchmark(300, 600, $<HTMLSelectElement>('#benchmark-scenario').value as BenchmarkScenario);
 });
+function downloadJson(json: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 $('#benchmark-save').addEventListener('click', () => {
-  if (!capture.report) return;
-  const url = URL.createObjectURL(new Blob([JSON.stringify(capture.report, null, 2)], { type: 'application/json' }));
-  const link = document.createElement('a'); link.href = url; link.download = `pluto-1000-${terrainSeed}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  if (capture.report) downloadJson(JSON.stringify(capture.report, null, 2), `pluto-1000-${capture.report.scenario}-${terrainSeed}.json`);
 });
 $('#watch-replay').addEventListener('click', () => watchReplay());
 $('#replay-watch-last').addEventListener('click', () => watchReplay());
@@ -509,6 +560,44 @@ document.addEventListener('keydown', event => { if (!event.repeat) recorder?.tap
 const replayUrl = parameters.get('replay');
 if (replayUrl) fetch(replayUrl).then(response => response.json()).then((data: unknown) => { if (validReplay(data)) watchReplay(data); else throw new Error('not a replay'); })
   .catch(error => { $('#error').hidden = false; $('#error').textContent = `Replay could not load: ${error instanceof Error ? error.message : error}`; });
+
+function truckTraceReport() { return sim.vehicles.trace?.report() ?? savedTruckTrace; }
+function updateTruckTraceControls() {
+  const trace = sim.vehicles.trace;
+  const button = $<HTMLButtonElement>('#truck-trace-toggle');
+  button.textContent = trace ? 'Stop recording' : 'Record trucks';
+  button.disabled = !trace && sim.result !== 'running';
+  const canSave = Boolean(trace || savedTruckTrace);
+  $<HTMLButtonElement>('#truck-trace-save').disabled = !canSave;
+  $<HTMLButtonElement>('#truck-trace-save-full').disabled = !canSave;
+  const status = $('#truck-trace-status');
+  const message = trace ? `${paused ? 'Recording paused' : 'Recording'} · ${trace.trackedCount} tracked · ${trace.stoppedCount} stopped`
+    : savedTruckTrace ? `Trace ready · ${savedTruckTrace.trucks.length} tracked · ${savedTruckTrace.stoppedTruckIds.length} stopped at end`
+    : 'Record driving decisions and flag trucks that stop for 2 seconds.';
+  if (status.textContent !== message) status.textContent = message;
+}
+function startTruckTrace() {
+  if (sim.result !== 'running') return false;
+  savedTruckTrace = null;
+  sim.vehicles.startTrace();
+  updateTruckTraceControls();
+  return true;
+}
+function stopTruckTrace() {
+  if (sim.vehicles.trace) savedTruckTrace = sim.vehicles.stopTrace();
+  updateTruckTraceControls();
+  return savedTruckTrace;
+}
+$('#truck-trace-toggle').addEventListener('click', () => {
+  if (sim.vehicles.trace) stopTruckTrace();
+  else startTruckTrace();
+});
+function saveTruckTrace(full: boolean) {
+  const report = truckTraceReport();
+  if (report) downloadJson(serializeTruckTrace(report, full), `pluto-trucks-${report.map}-${report.terrainSeed}-tick-${report.throughTick}${full ? '-full' : ''}.json`);
+}
+$('#truck-trace-save').addEventListener('click', () => saveTruckTrace(false));
+$('#truck-trace-save-full').addEventListener('click', () => saveTruckTrace(true));
 $('#apply-battle').addEventListener('click', () => {
   const count = Number($<HTMLSelectElement>('#deployment').value);
   if (Number.isFinite(count)) restart(count, undefined, terrainSeed);
@@ -519,7 +608,11 @@ equipmentTab.updateRifle(sim.rifle);
 soldiersTab = new SoldiersTab(roster, resetRoster, () => soldierList.toggle(true, battleRoster));
 tuningPanel = new TuningPanel($('#battle-app'), tuning, values => {
   stopBenchmark('Benchmark stopped: tuning changed.');
-  tuning = values; sim.applyLiveTuning(tuning); saveTuning(tuning); equipmentTab.updateCount(tuning.count); equipmentTab.updateRifle(sim.rifle); updateHud();
+  tuning = values; sim.applyLiveTuning(tuning);
+  saveTuning({ ...tuning, range: sim.rifle.range, rocketRange: sim.rocket.range, turretRangePosition: sim.tuning.turretRangePosition });
+  tuningPanel.sync(tuning, sim.tuning);
+  upgradeMenu.setTruckRange(sim.vehicles.range, effectiveTurretRange(tuning) === null);
+  equipmentTab.updateCount(tuning.count); equipmentTab.updateRifle(sim.rifle); updateHud();
 }, () => restartMap(), [equipmentTab, soldiersTab]);
 function closeOtherPanels() { if (!tuningPanel.element.hidden) { soundPanel.open = false; toggleDiagnostics(false); } }
 function openTuning() { tuningPanel.toggle(); closeOtherPanels(); }
@@ -583,6 +676,7 @@ function frame(now: number) {
     let steps = 0;
     while (accumulator >= CONFIG.step && steps < 4 * Math.max(1, speed)) {
       if (player && sim.tick >= player.replay.endTick) { accumulator = 0; break; }
+      benchmarkFixture?.beforeStep(sim);
       sim.step(); accumulator -= CONFIG.step; steps++; hzTicks++;
     }
     if (accumulator >= CONFIG.step) { const remaining = accumulator % CONFIG.step; droppedSimulationSeconds += accumulator - remaining; accumulator = remaining; }
@@ -601,7 +695,9 @@ function frame(now: number) {
   lastSimMs = afterSim - start; lastRenderMs = performance.now() - afterSim;
   simMs = simMs * 0.9 + lastSimMs * 0.1; renderMs = renderMs * 0.9 + lastRenderMs * 0.1;
   if (capture.active) {
-    capture.sample(now, { simMs, renderMs, droppedSimulationSeconds, renderScale: renderer.resolutionScale, live: sim.alive[0] + sim.alive[1], simulationTick: sim.tick });
+    capture.sample(now, { simMs: lastSimMs, renderMs: lastRenderMs, droppedSimulationSeconds, renderScale: renderer.resolutionScale,
+      live: sim.alive[0] + sim.alive[1], simulationTick: sim.tick, drawCalls: renderer.webgl.info.render.calls,
+      trucks: sim.vehicles.count, vehicleWork: sim.vehicles.metrics, openingDeployment: benchmarkFixture?.openingDeployment ?? null });
     if (!capture.active) { finishBenchmark(); setPaused(true); }
   }
   if (now - lastHudUpdate > 200) { updateHud(); lastHudUpdate = now; }
@@ -620,6 +716,7 @@ const api = {
   watchReplay,
   get replayPlayback() { return player && { tick: sim.tick, endTick: player.replay.endTick, finished: player.finished, desyncTick: player.desyncTick, checkedHashes: player.checkedHashes, speed: player.speed }; },
   setReplaySpeed(speed: number) { if (player) player.speed = speed; },
+  startTruckTrace, stopTruckTrace, truckTraceReport,
   get benchmark() { return { active: capture.active, report: capture.report }; },
   get explosionTesting() { return explosionTesting; }, setExplosionTesting,
   explode,
@@ -630,9 +727,10 @@ const api = {
   /** Upgrades an area for `target` (default: the rail's current target). */
   upgradeArea(id: UpgradeId, x: number, z: number, radius: number, target?: UpgradeTargetId) {
     const u = UPGRADES.find(u => u.id === id), t = target ? UPGRADE_TARGETS.find(t => t.id === target) : upgradeMenu.target;
-    return u && t ? upgradeArea(u, { x, z }, radius, t) : 0;
+    return u && t ? u.kind === 'vehicle' ? +deployTrucks({ x, z }, radius, t) : upgradeArea(u, { x, z }, radius, t) : 0;
   },
   get selectedSoldier() { return soldierCard.selectedId; },
+  get selectedVehicle() { return soldierCard.selectedVehicleId; },
   roster, get battleRoster() { return battleRoster; }, resetRoster,
   openSoldierList(open = true) { soldierList.toggle(open, battleRoster); },
   selectSoldier,
