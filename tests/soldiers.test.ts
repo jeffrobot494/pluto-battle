@@ -18,6 +18,7 @@ test('random names are 1–14 letters with a capital first letter', () => {
 test('create, read, update and delete soldiers', () => {
   const roster = new Roster(random(1));
   const a = roster.create(), b = roster.create({ name: 'Zed', level: 3 });
+  assert.equal(a.level, 1);
   assert.notEqual(a.id, b.id); assert.equal(roster.size, 2);
   assert.deepEqual(roster.get(b.id), { id: b.id, name: 'Zed', level: 3 });
   assert.ok(roster.update(a.id, { name: 'Quark', level: 2 }));
@@ -29,7 +30,7 @@ test('create, read, update and delete soldiers', () => {
   roster.get(a.id)!.level = 50; assert.equal(roster.get(a.id)!.level, 2);
   assert.ok(roster.delete(a.id)); assert.equal(roster.get(a.id), undefined); assert.equal(roster.size, 1);
   roster.reset(); assert.equal(roster.size, ROSTER_SIZE);
-  assert.ok(roster.list().every(r => r.level === 0)); assert.equal(roster.get(b.id), undefined);
+  assert.ok(roster.list().every(r => r.level === 1)); assert.equal(roster.get(b.id), undefined);
 });
 
 test('drafts are distinct, random in order and top up a small pool', () => {
@@ -45,7 +46,7 @@ test('drafts are distinct, random in order and top up a small pool', () => {
   assert.equal(small.draft(10).length, 10); assert.equal(small.size, 10);
 });
 
-test('survivors of a finished battle level up once; the fallen drop to level 0 and stay in the pool', () => {
+test('survivors of a finished battle level up once; the fallen drop to level 1 and stay in the pool', () => {
   const roster = new Roster(random(5)); roster.reset();
   for (const r of roster.list()) roster.update(r.id, { level: 5 });
   const sim = new BattleSimulation(20, 11);
@@ -62,17 +63,17 @@ test('survivors of a finished battle level up once; the fallen drop to level 0 a
   assert.equal(battle.recordOutcome(), false, 'no promotion while the battle runs');
   // Death resets a soldier's level immediately, once.
   assert.equal(battle.recordDeaths(), 10); assert.equal(battle.recordDeaths(), 0);
-  assert.ok(fallen.every(id => roster.get(id)?.level === 0));
-  assert.equal(battle.soldier(sim.id[plutonians[0]])!.level, 0, 'the battle record shows the reset');
+  assert.ok(fallen.every(id => roster.get(id)?.level === 1));
+  assert.equal(battle.soldier(sim.id[plutonians[0]])!.level, 1, 'the battle record shows the reset');
   sim.result = 'plutonians';
   assert.ok(battle.recordOutcome()); assert.equal(battle.recordOutcome(), false);
   const survivors = battle.living().map(s => s.record.id);
   assert.ok(survivors.every(id => roster.get(id)?.level === 6));
-  assert.ok(fallen.every(id => roster.get(id)?.level === 0)); assert.equal(roster.size, ROSTER_SIZE);
+  assert.ok(fallen.every(id => roster.get(id)?.level === 1)); assert.equal(roster.size, ROSTER_SIZE);
   assert.equal(roster.list().filter(r => r.level === 5).length, ROSTER_SIZE - 20, 'undrafted soldiers are untouched');
   assert.ok(battle.living().every(s => s.record.level === 6), 'battle records show the new level');
   // Recruits attached to an already fallen body after a reset are not counted as deaths.
-  roster.reset(); roster.update(roster.list()[0].id, { level: 1 });
+  roster.reset();
   assert.equal(new BattleRoster(roster, sim).recordDeaths(), 0);
 });
 
@@ -86,4 +87,22 @@ test('rosters save and load, and invalid saves fall back to a fresh pool', () =>
   writeSetting(SOLDIERS_KEY, '{"nextId":2,"soldiers":[[1,"bad name",0]]}');
   assert.equal(loadRoster().size, ROSTER_SIZE);
   assert.ok(readSetting(SOLDIERS_KEY));
+});
+
+test('saved level 0 recruits move to level 1 without changing veteran levels', () => {
+  const roster = new Roster();
+  assert.ok(roster.restore('{"nextId":3,"soldiers":[[1,"Nova",0],[2,"Vega",4]]}'));
+  assert.deepEqual(roster.list(), [{ id: 1, name: 'Nova', level: 1 }, { id: 2, name: 'Vega', level: 4 }]);
+});
+
+test('legacy levels above ten are restored and survivors stop at ten', () => {
+  const roster = new Roster(random(9));
+  assert.ok(roster.restore('{"nextId":3,"soldiers":[[1,"Nova",9],[2,"Vega",18]]}'));
+  assert.equal(roster.get(2)?.level, 10);
+  const sim = new BattleSimulation(2, 11);
+  const battle = new BattleRoster(roster, sim);
+  sim.result = 'plutonians';
+  assert.ok(battle.recordOutcome());
+  assert.deepEqual(battle.living().map(({ record }) => record.level), [10, 10]);
+  assert.deepEqual(roster.list().map(record => record.level), [10, 10]);
 });

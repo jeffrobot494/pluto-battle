@@ -26,7 +26,7 @@ try {
     // Drafted Plutonians carry roster names; the card shows name and level.
     const id = await page.evaluate(() => { const b = window.__battle, sim = b.sim; const i = [...Array(sim.used).keys()].find(i => sim.team[i] === 0); b.selectSoldier(sim.id[i]); return sim.id[i]; });
     const name = await page.evaluate(id => window.__battle.battleRoster.soldier(id).name, id);
-    assert.match(await page.locator('#soldier-card').textContent(), new RegExp(`${name}\\s*LV 0`));
+    assert.match(await page.locator('#soldier-card').textContent(), new RegExp(`${name}\\s*LV 1\\b`));
     await page.evaluate(() => window.__battle.selectSoldier(0));
 
     // View lists the living Plutonians.
@@ -47,14 +47,14 @@ try {
     });
     assert.equal(survivors.length, 7);
     const levels = await page.evaluate(ids => ids.map(id => window.__battle.roster.get(id).level), survivors);
-    assert.deepEqual(levels, Array(7).fill(1));
-    assert.equal(await page.evaluate(() => window.__battle.roster.list().filter(r => r.level > 0).length), 7);
-    assert.match(await page.locator('#roster-summary').textContent(), /7 veterans · top level 1/);
+    assert.deepEqual(levels, Array(7).fill(2));
+    assert.equal(await page.evaluate(() => window.__battle.roster.list().filter(r => r.level > 1).length), 7);
+    assert.match(await page.locator('#roster-summary').textContent(), /7 veterans · top level 2/);
     await page.click('#roster-view');
     assert.equal(await page.locator('#soldier-list li[data-sim-id]').count(), 7);
     await page.click('#close-soldier-list');
 
-    // A soldier who dies drops to level 0 at once; the rest keep their levels.
+    // A soldier who dies drops to level 1 at once; the rest keep their levels.
     const afterDeath = await page.evaluate(() => {
       const b = window.__battle; b.restartMap(); b.setPaused(true);
       const sim = b.sim, slots = [...Array(sim.used).keys()].filter(i => sim.team[i] === 0);
@@ -63,14 +63,14 @@ try {
       sim.hp[slots[0]] = 0; sim.alive[0]--; b.step(1);
       return { dead: b.roster.get(ids[0]).level, card: b.battleRoster.soldier(sim.id[slots[0]]).level, alive: b.roster.get(ids[1]).level };
     });
-    assert.deepEqual(afterDeath, { dead: 0, card: 0, alive: 3 });
+    assert.deepEqual(afterDeath, { dead: 1, card: 1, alive: 3 });
 
     // Reset needs a confirming second tap.
     await page.click('#roster-reset');
-    assert.ok(await page.evaluate(() => window.__battle.roster.list().filter(r => r.level > 0).length) > 0);
+    assert.ok(await page.evaluate(() => window.__battle.roster.list().some(r => r.level > 1)));
     await page.click('#roster-reset');
-    assert.equal(await page.evaluate(() => window.__battle.roster.list().filter(r => r.level > 0).length), 0);
-    assert.match(await page.locator('#roster-summary').textContent(), /1000 soldiers · 0 veterans/);
+    assert.ok(await page.evaluate(() => window.__battle.roster.list().every(r => r.level === 1)));
+    assert.match(await page.locator('#roster-summary').textContent(), /1000 soldiers · 0 veterans · top level 1/);
     await page.close();
   }
   assert.deepEqual(errors, []);

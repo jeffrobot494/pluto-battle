@@ -10,6 +10,7 @@ import type { GroundPoint } from './battle-input.ts';
 import { UPGRADES } from './upgrades.ts';
 import { CorpseRenderer, type CorpseArmor } from './corpse-renderer.ts';
 import { SoldierPose, setGunScale } from './soldier-pose.ts';
+import { makeRankBody } from './rank-armor.ts';
 import { truckGeometry, turretGeometry } from './truck-model.ts';
 import { DRIVER, GUNNER, PASSENGER, TRUCK, TURRET_EFFECT, angleDelta } from './vehicle-types.ts';
 
@@ -20,6 +21,13 @@ const truckColors = [new THREE.Color('#95e8a1'), new THREE.Color('#ff9a83')];
 const PULSE_SECONDS = 0.7;
 // Ability zone mesh resolution: a polar grid draped over the terrain.
 const ZONE_RINGS = 40, ZONE_SEGMENTS = 128;
+
+interface RankBatch {
+  mesh: THREE.InstancedMesh;
+  hitAttribute: THREE.InstancedBufferAttribute;
+  rankAttribute: THREE.InstancedBufferAttribute;
+  indexCountByLevel: number[];
+}
 
 /** Instanced capsule renderer. Hit feedback matches Pluto's emissive white pulse. */
 export class BattleRenderer {
@@ -80,6 +88,12 @@ export class BattleRenderer {
   private worldHalfWidth: number;
   private worldHalfDepth: number;
   private bodyRadius: number;
+  private readonly rankSkin: THREE.MeshLambertMaterial;
+  private rankBatch: RankBatch | null = null;
+  private maxRank = 0;
+  private readonly rankBySlot = new Uint8Array(CONFIG.capacity);
+  private readonly rankedIdBySlot = new Uint32Array(CONFIG.capacity);
+  private rankSim: BattleSimulation | null = null;
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -118,6 +132,17 @@ export class BattleRenderer {
     };
     skin.customProgramCacheKey = () => 'pluto-instanced-hit-v1';
     this.bodies = this.instances(capsule, skin, CONFIG.capacity);
+    this.rankSkin = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.rankSkin.onBeforeCompile = (shader, renderer) => {
+      skin.onBeforeCompile(shader, renderer);
+      // Each part's triangles have one unlock level. Clip locked parts before
+      // doing lighting or transform work, keeping every veteran in one draw.
+      shader.vertexShader = 'attribute float aRank; attribute float aUnlockLevel;\n' + shader.vertexShader.replace(
+        'void main() {',
+        'void main() {\nif (aRank < aUnlockLevel) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+      );
+    };
+    this.rankSkin.customProgramCacheKey = () => 'pluto-instanced-rank-v1';
     this.guns = this.instances(new THREE.BoxGeometry(0.11, 0.13, 0.68), new THREE.MeshStandardMaterial({ color: '#33343b', roughness: 0.64, metalness: 0.5 }), CONFIG.capacity);
     this.visors = this.instances(new THREE.BoxGeometry(0.25, 0.055, 0.045), new THREE.MeshBasicMaterial({ toneMapped: false }), CONFIG.capacity);
     const shadowCanvas = document.createElement('canvas'); shadowCanvas.width = shadowCanvas.height = 64;
@@ -228,6 +253,52 @@ export class BattleRenderer {
       mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
       mesh.instanceColor.clearUpdateRanges(); mesh.instanceColor.addUpdateRange(0, mesh.count * 3); mesh.instanceColor.needsUpdate = true;
     }
+  }
+
+  /** Refresh at deployment, roster reset or promotion. A reused slot must match its original ID. */
+  setSoldierRanks(sim: BattleSimulation, levelOf: (id: number) => number) {
+    if (this.rankSim !== sim) {
+      this.rankSim = sim;
+      this.rankBySlot.fill(0);
+      this.rankedIdBySlot.fill(0);
+      this.corpseRanks.clear();
+    } else {
+      const retiredIds = new Set(sim.retiredCorpses.map(corpse => corpse.id));
+      for (const id of this.corpseRanks.keys()) {
+        if (!sim.byId.has(id) && !retiredIds.has(id)) this.corpseRanks.delete(id);
+      }
+    }
+    let maxRank = 0;
+    for (let i = 0; i < sim.used; i++) {
+      const id = sim.id[i];
+      // A corpse keeps the armor it fell in, even though its roster level has been reset.
+      const level = sim.hp[i] > 0 ? levelOf(id)
+        : this.rankedIdBySlot[i] === id && sim.time - sim.diedAt[i] < CONFIG.corpseLifetime ? this.rankBySlot[i] : 0;
+      this.rankBySlot[i] = level >= 2 ? level : 0;
+      if (sim.hp[i] > 0) {
+        if (level >= 2) this.corpseRanks.set(id, level);
+        else this.corpseRanks.delete(id);
+      }
+      if (level >= 2) {
+        this.rankedIdBySlot[i] = id;
+        maxRank = Math.max(maxRank, level);
+      }
+    }
+    this.maxRank = maxRank;
+    if (maxRank && !this.rankBatch) {
+      const hitAttribute = new THREE.InstancedBufferAttribute(new Float32Array(CONFIG.capacity), 1);
+      const rankAttribute = new THREE.InstancedBufferAttribute(new Uint8Array(CONFIG.capacity), 1);
+      hitAttribute.setUsage(THREE.DynamicDrawUsage);
+      rankAttribute.setUsage(THREE.DynamicDrawUsage);
+      const { geometry, indexCountByLevel } = makeRankBody(this.bodyRadius);
+      geometry.setAttribute('aHitAt', hitAttribute);
+      geometry.setAttribute('aRank', rankAttribute);
+      const mesh = this.instances(geometry, this.rankSkin, CONFIG.capacity);
+      mesh.name = 'Plutonian rank armor';
+      this.rankBatch = { mesh, hitAttribute, rankAttribute, indexCountByLevel };
+    }
+    if (this.rankBatch) this.rankBatch.mesh.geometry.setDrawRange(0, this.rankBatch.indexCountByLevel[maxRank]);
+    this.corpseArmor = this.rankBatch ?? undefined;
   }
 
   private terrain: Terrain | null = null;
@@ -418,11 +489,23 @@ export class BattleRenderer {
       this.bodies.geometry.dispose(); this.bodyRadius = sim.tuning.radius;
       this.bodies.geometry = new THREE.CapsuleGeometry(this.bodyRadius, CONFIG.soldier.height - this.bodyRadius * 2, 2, 6);
       this.bodies.geometry.setAttribute('aHitAt', this.hitAttribute);
+      if (this.rankBatch) {
+        const { mesh, hitAttribute, rankAttribute } = this.rankBatch;
+        const { geometry, indexCountByLevel } = makeRankBody(this.bodyRadius);
+        geometry.setAttribute('aHitAt', hitAttribute);
+        geometry.setAttribute('aRank', rankAttribute);
+        geometry.setDrawRange(0, indexCountByLevel[this.maxRank]);
+        mesh.geometry.dispose();
+        mesh.geometry = geometry;
+        this.rankBatch.indexCountByLevel = indexCountByLevel;
+      }
     }
     this.uniforms.time.value = visualTime;
     this.uniforms.duration.value = sim.tuning.flashDuration; this.uniforms.intensity.value = sim.tuning.flashIntensity;
-    let count = 0, gunCount = 0, shadowCount = 0, pulses = 0;
+    let count = 0, gunCount = 0, shadowCount = 0, bodyCount = 0, rankedCount = 0, pulses = 0, ranksChanged = false;
     const f = sim.vehicles;
+    const rankBatch = this.rankBatch;
+    const ranks = this.rankSim === sim && this.maxRank > 0 ? this.rankBySlot : null;
     const now = performance.now() / 1000;
     if (this.pulseSim !== sim) { this.pulseSim = sim; this.upgradeSeen.set(sim.upgrades.subarray(0, CONFIG.capacity)); this.pulseAt.fill(-Infinity); }
     this.selectionRing.visible = false;
@@ -450,8 +533,22 @@ export class BattleRenderer {
       this.dummy.position.copy(pose.center);
       this.dummy.quaternion.copy(pose.rotation);
       this.dummy.scale.setScalar(fade);
-      this.dummy.updateMatrix(); this.bodies.setMatrixAt(count, this.dummy.matrix); this.bodies.setColorAt(count, bodyColors[sim.team[i]]);
-      this.hitAttribute.setX(count, Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000);
+      this.dummy.updateMatrix();
+      const hitAt = Number.isFinite(sim.lastHit[i]) ? sim.lastHit[i] : -10000;
+      const level = ranks?.[i] ?? 0;
+      if (level && rankBatch && this.rankedIdBySlot[i] === sim.id[i]) {
+        rankBatch.mesh.setMatrixAt(rankedCount, this.dummy.matrix);
+        rankBatch.hitAttribute.setX(rankedCount, hitAt);
+        if (rankBatch.rankAttribute.array[rankedCount] !== level) {
+          rankBatch.rankAttribute.array[rankedCount] = level;
+          ranksChanged = true;
+        }
+        rankedCount++;
+      } else {
+        this.bodies.setMatrixAt(bodyCount, this.dummy.matrix);
+        this.bodies.setColorAt(bodyCount, bodyColors[sim.team[i]]);
+        this.hitAttribute.setX(bodyCount++, hitAt);
+      }
 
       const size = radius / CONFIG.soldier.radius;
       if (v < 0 || role === PASSENGER) {
@@ -487,10 +584,22 @@ export class BattleRenderer {
       }
       count++;
     }
-    this.bodies.count = count;
-    if (count) {
+    this.bodies.count = bodyCount;
+    if (bodyCount) {
       this.upload(this.bodies);
-      this.hitAttribute.clearUpdateRanges(); this.hitAttribute.addUpdateRange(0, count); this.hitAttribute.needsUpdate = true;
+      this.hitAttribute.clearUpdateRanges(); this.hitAttribute.addUpdateRange(0, bodyCount); this.hitAttribute.needsUpdate = true;
+    }
+    if (rankBatch) {
+      const { mesh, hitAttribute, rankAttribute } = rankBatch;
+      mesh.count = rankedCount;
+      mesh.visible = rankedCount > 0;
+      if (rankedCount) {
+        this.upload(mesh);
+        hitAttribute.clearUpdateRanges(); hitAttribute.addUpdateRange(0, rankedCount); hitAttribute.needsUpdate = true;
+        if (ranksChanged) {
+          rankAttribute.clearUpdateRanges(); rankAttribute.addUpdateRange(0, rankedCount); rankAttribute.needsUpdate = true;
+        }
+      }
     }
     this.guns.count = gunCount; this.visors.count = count; this.shadows.count = shadowCount;
     for (const mesh of [this.guns, this.visors, this.shadows]) if (mesh.count) this.upload(mesh);
@@ -584,6 +693,8 @@ export class BattleRenderer {
     this.resizeObserver.disconnect(); this.twist.dispose(); this.controls.dispose();
     this.bedrockDetail.texture.dispose();
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
+    materials.add(this.rankSkin);
+    this.rankBatch?.mesh.dispose();
     this.trucks.dispose(); this.turrets.dispose();
     this.scene.traverse(object => { const mesh = object as THREE.Mesh; if (mesh.geometry) geometries.add(mesh.geometry); if (mesh.material) for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) materials.add(m); });
     geometries.forEach(g => g.dispose()); materials.forEach(m => m.dispose()); this.shadowTexture.dispose(); this.webgl.dispose();

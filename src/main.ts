@@ -151,6 +151,10 @@ let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?
 // Plutonians are drafted at random from the persistent soldier pool every battle.
 const roster = loadRoster(); saveRoster(roster);
 let battleRoster = new BattleRoster(roster, sim), rosterDirty = false;
+function updateRankAppearance() {
+  renderer.setSoldierRanks(sim, id => battleRoster.soldier(id)?.level ?? 0);
+}
+updateRankAppearance();
 // Replays (prototype): every battle records its inputs; the viewer re-runs them through the same sim.
 let recorder: ReplayRecorder | null = null, player: ReplayPlayer | null = null, lastReplay: Replay | null = null;
 /** The player's own settings while a replay borrows the recorded ones. */
@@ -172,7 +176,9 @@ function replayRoster(replay: Replay) {
 }
 startRecording();
 function flushRoster() {
-  if (battleRoster.recordDeaths() || battleRoster.recordOutcome()) rosterDirty = true;
+  const died = battleRoster.recordDeaths() > 0, ended = battleRoster.recordOutcome();
+  if (ended) updateRankAppearance();
+  if (died || ended) rosterDirty = true;
   if (rosterDirty) { saveRoster(roster); rosterDirty = false; }
 }
 let explosionTesting = false;
@@ -282,6 +288,7 @@ function resetRoster() {
   roster.reset(); saveRoster(roster); rosterDirty = false;
   // Fresh recruits take the places of the soldiers already on the field.
   battleRoster = new BattleRoster(roster, sim);
+  updateRankAppearance();
   soldierCard.update(sim); soldierList.update(battleRoster);
 }
 function explode(point: GroundPoint) {
@@ -346,7 +353,7 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, be
   flushRoster();
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, candidate, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
   deploymentRevision = 0; upgradeMenu.setTruckRange(sim.vehicles.range);
-  battleRoster = new BattleRoster(replay ? replayRoster(replay) : roster, sim); soldiersTab?.refresh();
+  battleRoster = new BattleRoster(replay ? replayRoster(replay) : roster, sim); updateRankAppearance(); soldiersTab?.refresh();
   if (replay) beginReplayMode(replay); else startRecording();
   setExplosionTesting(false);
   input.reset(); zone = null; renderer.setZone(null); selectSoldier(0); upgradeMenu.select(null);
@@ -440,6 +447,7 @@ function updateHud() {
   if (!capture.active) showDeploymentReport();
   // Deaths reset levels at once (in memory); the roster is saved when the battle ends or is left.
   const died = battleRoster.recordDeaths() > 0, ended = battleRoster.recordOutcome();
+  if (ended) updateRankAppearance();
   if (died || ended) { rosterDirty = true; soldiersTab?.refresh(); }
   if (sim.result !== 'running') flushRoster();
   soldierCard.update(sim); soldierList.update(battleRoster); updateReplayBar();

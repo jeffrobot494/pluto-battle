@@ -9,6 +9,8 @@ import type { BattleSimulation, Team } from './simulation.ts';
 export interface SoldierRecord { id: number; name: string; level: number }
 
 export const ROSTER_SIZE = 1000;
+export const STARTING_SOLDIER_LEVEL = 1;
+export const MAX_SOLDIER_LEVEL = 10;
 export const NAME_MAX = 14;
 export const SOLDIERS_KEY = 'pluto-battle-soldiers-v1';
 const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
@@ -22,6 +24,7 @@ export function randomName(rng: () => number = Math.random) {
 }
 export function validName(name: unknown): name is string { return typeof name === 'string' && /^[A-Za-z]{1,14}$/.test(name); }
 function validLevel(level: unknown): level is number { return typeof level === 'number' && Number.isInteger(level) && level >= 0; }
+function clampLevel(level: number) { return Math.max(STARTING_SOLDIER_LEVEL, Math.min(level, MAX_SOLDIER_LEVEL)); }
 
 export class Roster {
   private records = new Map<number, SoldierRecord>();
@@ -35,7 +38,8 @@ export class Roster {
   list(): SoldierRecord[] { return [...this.records.values()].map(r => ({ ...r })); }
 
   create(fields: Partial<Omit<SoldierRecord, 'id'>> = {}): SoldierRecord {
-    const record = { id: this.nextId++, name: validName(fields.name) ? fields.name : randomName(this.rng), level: validLevel(fields.level) ? fields.level : 0 };
+    const level = validLevel(fields.level) ? clampLevel(fields.level) : STARTING_SOLDIER_LEVEL;
+    const record = { id: this.nextId++, name: validName(fields.name) ? fields.name : randomName(this.rng), level };
     this.records.set(record.id, record);
     return { ...record };
   }
@@ -44,11 +48,11 @@ export class Roster {
     const record = this.records.get(id);
     if (!record || (patch.name !== undefined && !validName(patch.name)) || (patch.level !== undefined && !validLevel(patch.level))) return false;
     if (patch.name !== undefined) record.name = patch.name;
-    if (patch.level !== undefined) record.level = patch.level;
+    if (patch.level !== undefined) record.level = clampLevel(patch.level);
     return true;
   }
   delete(id: number) { return this.records.delete(id); }
-  /** Replaces every soldier with `size` fresh level-0 recruits. */
+  /** Replaces every soldier with `size` fresh recruits at the starting level. */
   reset(size = ROSTER_SIZE) {
     this.records.clear();
     for (let i = 0; i < size; i++) this.create();
@@ -69,7 +73,10 @@ export class Roster {
   }
   /** Survivors of a finished battle gain a level. */
   promote(ids: Iterable<number>) {
-    for (const id of ids) { const record = this.records.get(id); if (record) record.level++; }
+    for (const id of ids) {
+      const record = this.records.get(id);
+      if (record) record.level = Math.min(record.level + 1, MAX_SOLDIER_LEVEL);
+    }
   }
 
   serialize() { return JSON.stringify({ nextId: this.nextId, soldiers: [...this.records.values()].map(r => [r.id, r.name, r.level]) }); }
@@ -82,7 +89,7 @@ export class Roster {
       for (const entry of data.soldiers) {
         const [id, name, level] = Array.isArray(entry) ? entry : [];
         if (!Number.isInteger(id) || id <= 0 || id >= data.nextId || records.has(id) || !validName(name) || !validLevel(level)) return false;
-        records.set(id, { id, name, level });
+        records.set(id, { id, name, level: clampLevel(level) });
       }
       this.records = records; this.nextId = data.nextId;
       return true;
@@ -135,14 +142,16 @@ export class BattleRoster {
     }
     return living;
   }
-  /** Soldiers who died lose every level. Returns how many newly fallen soldiers were reset. */
+  /** Soldiers who died return to the starting level. Returns how many newly fallen soldiers were reset. */
   recordDeaths() {
     let count = 0;
     for (const [simId, record] of this.bySimId) {
       if (this.fallen.has(simId)) continue;
       const i = this.sim.byId.get(simId);
       if (i !== undefined && this.sim.hp[i] > 0) continue;
-      this.fallen.add(simId); this.roster.update(record.id, { level: 0 }); record.level = 0; count++;
+      this.fallen.add(simId);
+      this.roster.update(record.id, { level: STARTING_SOLDIER_LEVEL });
+      record.level = STARTING_SOLDIER_LEVEL; count++;
     }
     return count;
   }
@@ -153,7 +162,7 @@ export class BattleRoster {
     this.recordDeaths();
     const survivors = this.living();
     this.roster.promote(survivors.map(s => s.record.id));
-    for (const s of survivors) s.record.level++;
+    for (const { record } of survivors) record.level = Math.min(record.level + 1, MAX_SOLDIER_LEVEL);
     return true;
   }
 }

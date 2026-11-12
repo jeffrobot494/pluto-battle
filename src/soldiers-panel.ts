@@ -1,4 +1,4 @@
-import type { BattleRoster, Roster } from './soldiers.ts';
+import { STARTING_SOLDIER_LEVEL, type BattleRoster, type Roster } from './soldiers.ts';
 import type { TuningPage } from './tuning-panel.ts';
 
 /** Soldier pool summary, shown as the "Roster" tab of the tuning panel. */
@@ -16,12 +16,12 @@ export class SoldiersTab implements TuningPage {
     this.content = document.createElement('div');
     this.content.className = 'roster-page';
     this.content.innerHTML = `
-      <p class="roster-intro tuning-page-note">Plutonians are drawn at random from a persistent pool each battle. Survivors gain a level when the battle ends; soldiers who die drop back to level 0.</p>
+      <p class="roster-intro tuning-page-note">Plutonians are drawn at random from a persistent pool each battle. Survivors gain a level when the battle ends; soldiers who die drop back to level ${STARTING_SOLDIER_LEVEL}.</p>
       <div class="roster-row" data-search-row="soldiers roster pool level reset view names">
         <p id="roster-summary"></p>
         <div class="roster-actions"><button type="button" id="roster-view">View</button><button type="button" id="roster-reset">Reset</button></div>
       </div>
-      <p class="roster-help tuning-page-note">View lists soldiers alive in this battle. Reset replaces the pool with fresh level-0 recruits.</p>`;
+      <p class="roster-help tuning-page-note">View lists soldiers alive in this battle. Reset replaces the pool with fresh recruits at level ${STARTING_SOLDIER_LEVEL}.</p>`;
     this.summary = this.content.querySelector('#roster-summary')!;
     this.resetButton = this.content.querySelector('#roster-reset')!;
     this.content.querySelector('#roster-view')!.addEventListener('click', () => this.onView());
@@ -36,7 +36,7 @@ export class SoldiersTab implements TuningPage {
   private disarm() { clearTimeout(this.confirmTimer); this.confirmTimer = 0; this.resetButton.textContent = 'Reset'; this.resetButton.classList.remove('confirming'); }
   refresh() {
     const levels = this.roster.list().map(r => r.level);
-    const top = levels.reduce((a, b) => Math.max(a, b), 0), veterans = levels.filter(l => l > 0).length;
+    const top = levels.reduce((a, b) => Math.max(a, b), 0), veterans = levels.filter(l => l > STARTING_SOLDIER_LEVEL).length;
     this.summary.innerHTML = `<b>${levels.length}</b> soldiers · <b>${veterans}</b> veterans · top level <b>${top}</b>`;
   }
   error() { return null; }
