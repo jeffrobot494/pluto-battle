@@ -23,7 +23,7 @@ export const DEFAULT_TUNING = {
   truckReverseSpeed: 3.8, truckTurnRate: 2.8, truckGrip: 9, truckSlope: 0.68, truckPathing: 1, truckRouteLookahead: 8,
   turretRangePosition: 77, turretDamage: 20, turretInterval: 0.36,
   truckStandoff: 0.65, truckCrowdRisk: 1, truckFriendlyRisk: 3.5, truckRamAggression: 1.1,
-  truckDecisionInterval: 1, truckCommitment: 0.8, truckDecisionsPerTick: 8,
+  truckDecisionInterval: 1, truckCommitment: 0.8, truckDecisionsPerTick: 20,
   truckRamSpeed: 4.5, truckRamDamage: 19, truckRamImpulse: 2.2, truckImpactLoss: 0.18,
   truckBlastRadius: 3.4, truckBlastDamage: 64, truckBlastImpulse: 10,
 };

@@ -15,6 +15,8 @@ const RECOVERY_STEERING = [0.4, -0.4];
 const RECOVERY_DISTANCE = 0.85;
 const RECOVERY_DISTANCES = [RECOVERY_DISTANCE, 0.3];
 const SHORT_RECOVERY_SPEED = 0.8;
+/** Seconds before a truck that found no clear move plans again. */
+const HOLD_RETRY = 0.25;
 const RECOVERY_STEPS = Math.ceil(0.7 / CONFIG.step);
 /** Longest field chain a route can follow (cells), whatever the lookahead. */
 const MAX_CHAIN = 64;
@@ -368,6 +370,8 @@ export class TruckTactics {
       }
     }
     this.commit(v, Maneuver.Hold, yaw, 0);
+    // Traffic that blocks every move now usually clears within a fraction of a second; look again soon.
+    f.due[v] = sim.time + HOLD_RETRY; f.committedUntil[v] = sim.time; f.urgent[v] = 1;
     if (trace && checks) trace.decision(v, 'no-clear-route', waiting, this.routeCount, checks, null, recovery, this.routeTrace(v));
   }
 
