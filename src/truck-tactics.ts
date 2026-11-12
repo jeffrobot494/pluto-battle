@@ -128,7 +128,10 @@ export class TruckTactics {
    */
   private aim(v: number, tx: number, tz: number, toward: number, distance: number) {
     const nav = this.routeNav;
-    if (!nav || !Number.isFinite(this.routeYaw) || distance <= (this.f.range ?? 0) + LOCAL_FIGHT) return toward;
+    if (!nav || !Number.isFinite(this.routeYaw)) return toward;
+    // Always-route: follow the field wherever it has a route, even in the open and in close fights.
+    if (this.f.sim.tuning.truckRouteAlways) { this.routeUsed = true; return this.routeYaw; }
+    if (distance <= (this.f.range ?? 0) + LOCAL_FIGHT) return toward;
     const f = this.f, t = f.sim.tuning, x = f.x[v], z = f.z[v], goal = nav.nodeAt(tx, tz);
     const gx = goal >= 0 ? nav.x(goal) : tx, gz = goal >= 0 ? nav.z(goal) : tz, length = Math.hypot(gx - x, gz - z);
     const k = Math.min(1, 1.5 * t.truckRouteLookahead / Math.max(length, 1e-6));

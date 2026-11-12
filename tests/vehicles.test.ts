@@ -352,7 +352,7 @@ function routeRun(rocks: ReturnType<ReturnType<typeof wallRock>>[], changes: Par
 
 test('drivers follow the truck route out of a U-shaped wall that stops a straight-line driver', () => {
   const cup = [...rockLine(-9, 0, 9, 0), ...rockLine(-9, -1.3, -9, -14), ...rockLine(9, -1.3, 9, -14)].map(wallRock());
-  const routed = routeRun(cup, {}, [0, -6], [[0, 18]], 1200, true);
+  const routed = routeRun(cup, { truckRouteAlways: 0 }, [0, -6], [[0, 18]], 1200, true);
   assert.ok(routed.closest < 6, `reached the enemy behind the cup (${routed.closest.toFixed(1)})`);
   assert.ok(routed.states.has('route') && routed.states.has('straight'), 'routed around the wall, then drove straight');
   const decisions = routed.trace!.report().trucks[0].events.filter(e => e.kind === 'decision');
@@ -371,14 +371,14 @@ test('drivers find a canyon entrance far outside the old search horizon', () => 
 
 test('open-field routes are unchanged by the truck route', () => {
   const far = [[-24, 30]].map(wallRock()), foes = [[3, 14], [-2, 16], [8, 20]];
-  const on = routeRun(far, {}, [0, -6], foes, 900), off = routeRun(far, { truckPathing: 0 }, [0, -6], foes, 900);
+  const on = routeRun(far, { truckRouteAlways: 0 }, [0, -6], foes, 900), off = routeRun(far, { truckPathing: 0 }, [0, -6], foes, 900);
   assert.deepEqual(on.trail, off.trail);
   assert.ok(!on.states.has('route') && on.states.has('straight'));
 });
 
 test('an enemy on unreachable ground draws the truck to a firing position at its foot', () => {
   const rim = rockRing(0, 18, 6, 30).map(wallRock(0.5));
-  const run = routeRun(rim, {}, [0, -6], [[0, 18]], 1200), f = run.sim.vehicles, nav = f.truckNavigation!;
+  const run = routeRun(rim, { truckRouteAlways: 0 }, [0, -6], [[0, 18]], 1200), f = run.sim.vehicles, nav = f.truckNavigation!;
   assert.ok(run.distance > 7.1 && run.distance < effectiveTurretRange(run.sim.tuning), `holds in turret range outside the rim (${run.distance.toFixed(1)})`);
   assert.ok(Number.isFinite(nav.fields[0].distance[nav.nodeAt(f.x[run.v], f.z[run.v])]), 'the firing cell is on the field');
 });
@@ -479,7 +479,7 @@ test('two trucks touching at an angle can drive along their length but not deepe
 });
 
 test('two allied trucks meeting nose to nose in a one-lane gap both get through', () => {
-  const sim = recoveryWorld([...rockLine(-27, 0, -1.9, 0), ...rockLine(1.9, 0, 27, 0)]), f = sim.vehicles;
+  const sim = recoveryWorld([...rockLine(-27, 0, -1.9, 0), ...rockLine(1.9, 0, 27, 0)], { truckRouteAlways: 0 }), f = sim.vehicles;
   toughEnemy(sim, 0, 16);
   const north = crew(sim, 0, 0, -7), south = crew(sim, 0, 0, 7);
   f.setPose(north, 0, -6, 0); f.setPose(south, 0, 5, Math.PI); f.exitLeft[north] = f.exitLeft[south] = 0;
