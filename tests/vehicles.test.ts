@@ -6,6 +6,7 @@ import { Terrain } from '../src/terrain.ts';
 import { DEFAULT_TUNING, effectiveTurretRange, loadTuning, type TuningValues } from '../src/tuning.ts';
 import { writeSetting } from '../src/settings-store.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, SEAT_COUNT, TRUCK } from '../src/vehicle-types.ts';
+import { ROUTE_STATES } from '../src/truck-tactics.ts';
 
 function battle(changes: Partial<TuningValues> = {}, terrain?: Terrain) {
   const sim = new BattleSimulation(0, 27, 128, { ...DEFAULT_TUNING, speed: 0.2, ...changes }, terrain);
@@ -322,4 +323,73 @@ test('an expired recruitment reservation frees both the rider and the seat', () 
   assert.equal(f.reservation(v, DRIVER), recruit); assert.equal(f.reservedVehicle[recruit], v);
   tick(sim, 33);
   assert.equal(f.reservation(v, DRIVER), -1); assert.equal(f.reservedVehicle[recruit], -1); assert.equal(f.seat(v, DRIVER), -1);
+});
+
+const wallRock = (height = 3) => ([x, z]: number[]) => ({ x, z, radius: 1.1, base: 0, height, angle: 0 });
+function rockLine(x0: number, z0: number, x1: number, z1: number) {
+  const n = Math.ceil(Math.hypot(x1 - x0, z1 - z0) / 1.3);
+  return Array.from({ length: n + 1 }, (_, k) => [x0 + (x1 - x0) * k / n, z0 + (z1 - z0) * k / n]);
+}
+function rockRing(x: number, z: number, radius: number, count: number) {
+  return Array.from({ length: count }, (_, k) => [x + Math.sin(k * 2 * Math.PI / count) * radius, z + Math.cos(k * 2 * Math.PI / count) * radius]);
+}
+/** One crewed truck at `start` against tough, unarmed enemies: its closest approach, end, trail and route states seen. */
+function routeRun(rocks: ReturnType<ReturnType<typeof wallRock>>[], changes: Partial<TuningValues>, start: number[], enemies: number[][], ticks: number, traced = false) {
+  const terrain = new Terrain(28, 34, 0, rocks);
+  terrain.rebuild();
+  const sim = battle({ truckRamAggression: 0, ...changes }, terrain), f = sim.vehicles, v = crew(sim, 0, start[0], start[1]);
+  const foes = enemies.map(([x, z]) => { const i = spawn(sim, 1, x, z); sim.hp[i] = 1e6; return i; });
+  const trace = traced ? f.startTrace() : null;
+  const states = new Set<string>(), trail: number[] = [];
+  let closest = Infinity;
+  for (let n = 0; n < ticks; n++) {
+    tick(sim);
+    closest = Math.min(closest, Math.hypot(f.x[v] - sim.x[foes[0]], f.z[v] - sim.z[foes[0]]));
+    states.add(ROUTE_STATES[f.tactics.routeState[v]]); trail.push(f.x[v], f.z[v], f.yaw[v]);
+  }
+  return { sim, v, closest, states, trail, trace, distance: Math.hypot(f.x[v] - sim.x[foes[0]], f.z[v] - sim.z[foes[0]]) };
+}
+
+test('drivers follow the truck route out of a U-shaped wall that stops a straight-line driver', () => {
+  const cup = [...rockLine(-9, 0, 9, 0), ...rockLine(-9, -1.3, -9, -14), ...rockLine(9, -1.3, 9, -14)].map(wallRock());
+  const routed = routeRun(cup, {}, [0, -6], [[0, 18]], 1200, true);
+  assert.ok(routed.closest < 6, `reached the enemy behind the cup (${routed.closest.toFixed(1)})`);
+  assert.ok(routed.states.has('route') && routed.states.has('straight'), 'routed around the wall, then drove straight');
+  const decisions = routed.trace!.report().trucks[0].events.filter(e => e.kind === 'decision');
+  const step = decisions.find(e => e.kind === 'decision' && e.route?.state === 'route');
+  assert.ok(step && step.kind === 'decision' && step.route!.target && step.route!.fieldDistance! > 0, 'the trace records the route');
+  const straight = routeRun(cup, { truckPathing: 0 }, [0, -6], [[0, 18]], 1200);
+  assert.ok(straight.closest > 15, 'with pathfinding off the driver stays inside the cup');
+  assert.deepEqual([...straight.states].filter(s => s !== 'none'), ['disabled']);
+});
+
+test('drivers find a canyon entrance far outside the old search horizon', () => {
+  const ridge = [...rockLine(-27, 0, 16, 0), ...rockLine(23, 0, 27, 0)].map(wallRock());
+  assert.ok(routeRun(ridge, {}, [0, -6], [[0, 18]], 1500).closest < 6, 'drove through a gap 17 units to the side');
+  assert.ok(routeRun(ridge, { truckPathing: 0 }, [0, -6], [[0, 18]], 1500).closest > 15);
+});
+
+test('open-field routes are unchanged by the truck route', () => {
+  const far = [[-24, 30]].map(wallRock()), foes = [[3, 14], [-2, 16], [8, 20]];
+  const on = routeRun(far, {}, [0, -6], foes, 900), off = routeRun(far, { truckPathing: 0 }, [0, -6], foes, 900);
+  assert.deepEqual(on.trail, off.trail);
+  assert.ok(!on.states.has('route') && on.states.has('straight'));
+});
+
+test('an enemy on unreachable ground draws the truck to a firing position at its foot', () => {
+  const rim = rockRing(0, 18, 6, 30).map(wallRock(0.5));
+  const run = routeRun(rim, {}, [0, -6], [[0, 18]], 1200), f = run.sim.vehicles, nav = f.truckNavigation!;
+  assert.ok(run.distance > 7.1 && run.distance < effectiveTurretRange(run.sim.tuning), `holds in turret range outside the rim (${run.distance.toFixed(1)})`);
+  assert.ok(Number.isFinite(nav.fields[0].distance[nav.nodeAt(f.x[run.v], f.z[run.v])]), 'the firing cell is on the field');
+});
+
+test('each route fallback is reported: disabled, no graph, not ready and unknown cell', () => {
+  const flat = battle({ truckRamAggression: 0 }), v = crew(flat, 0, 0, -6);
+  spawn(flat, 1, 0, 18); tick(flat, 120);
+  assert.equal(ROUTE_STATES[flat.vehicles.tactics.routeState[v]], 'no-graph');
+  const box = rockRing(0, -20, 3.2, 16).map(wallRock());
+  const boxed = routeRun(box, {}, [0, -20], [[0, 25]], 300);
+  assert.ok(boxed.states.has('not-ready'), 'plans while the graph builds fall back');
+  assert.equal(ROUTE_STATES[boxed.sim.vehicles.tactics.routeState[boxed.v]], 'unknown-cell');
+  assert.ok(routeRun(box, { truckPathing: 0 }, [0, -20], [[0, 25]], 120).states.has('disabled'));
 });

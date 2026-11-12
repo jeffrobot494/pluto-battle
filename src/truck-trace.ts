@@ -37,11 +37,24 @@ export interface RouteCheck {
   blockedBy: RouteBlock | null;
 }
 
+/** How a decision aimed: along the truck field, or straight (by choice, or as a fallback). */
+export interface RouteTrace {
+  state: 'none' | 'straight' | 'route' | 'disabled' | 'no-graph' | 'not-ready' | 'unknown-cell';
+  /** Field distance at the truck's cell, when the field knows it. */
+  fieldDistance: number | null;
+  /** Route heading from the field (downhill, string-pulled), when one exists. */
+  heading: number | null;
+  /** String-pull target cell, when the route was used. */
+  target: { x: number; z: number } | null;
+  /** Heading up the field, offered as an Escape. */
+  escape: number | null;
+}
+
 interface EventStamp { tick: number; x: number; z: number }
 type TraceEvent = EventStamp & (
   | { kind: 'activity'; activity: Activity; mode: keyof typeof Maneuver; crew: ReturnType<TruckTrace['crew']> }
   | { kind: 'decision'; outcome: Decision; mode: keyof typeof Maneuver; requestedYaw: number; requestedSpeed: number;
-    waitedTicks: number; routesScored: number; checks: RouteCheck[]; selectedCheck: number | null; recovery: RecoveryCheck[] }
+    waitedTicks: number; routesScored: number; checks: RouteCheck[]; selectedCheck: number | null; recovery: RecoveryCheck[]; route: RouteTrace | null }
   | { kind: 'contact'; blocker: TruckBlocker; sweepSpeed: number; fraction: number; count: number; throughTick: number }
   | { kind: 'stopped'; activity: Activity; sinceTick: number }
   | { kind: 'stop-ended'; reason: StopEnd }
@@ -197,12 +210,12 @@ export class TruckTrace {
     }
   }
 
-  decision(v: number, outcome: Decision, wait: number, routesScored: number, checks: RouteCheck[], selectedCheck: number | null, recovery: RecoveryCheck[] = []) {
+  decision(v: number, outcome: Decision, wait: number, routesScored: number, checks: RouteCheck[], selectedCheck: number | null, recovery: RecoveryCheck[] = [], route: RouteTrace | null = null) {
     const f = this.fleet;
     this.append(this.history(v), {
       ...this.stamp(v), kind: 'decision', outcome, mode: maneuverName(f.mode[v]),
       requestedYaw: f.desiredYaw[v], requestedSpeed: f.desiredSpeed[v],
-      waitedTicks: Math.round(wait / CONFIG.step), routesScored, checks, selectedCheck, recovery,
+      waitedTicks: Math.round(wait / CONFIG.step), routesScored, checks, selectedCheck, recovery, route,
     });
   }
 

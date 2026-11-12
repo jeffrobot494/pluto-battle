@@ -1,7 +1,8 @@
 import { CONFIG } from './config.ts';
 import { DRIVER, GUNNER, PASSENGER, Maneuver, TRUCK, angleDelta } from './vehicle-types.ts';
 import type { VehicleFleet } from './vehicles.ts';
-import { maneuverName, type RecoveryCheck, type RouteBlock, type RouteCheck } from './truck-trace.ts';
+import { maneuverName, type RecoveryCheck, type RouteBlock, type RouteCheck, type RouteTrace } from './truck-trace.ts';
+import type { Navigation } from './navigation.ts';
 
 const SAMPLES = 4, STRIDE = 0.28, SHORTLIST = 3, MAX_ROUTES = 26;
 const MAX_DECISIONS = 32;
@@ -11,6 +12,14 @@ const RECOVERY_DIRECTIONS = [-1, 1];
 const RECOVERY_STEERING = [0.4, -0.4];
 const RECOVERY_DISTANCE = 0.85;
 const RECOVERY_STEPS = Math.ceil(0.7 / CONFIG.step);
+/** Longest field chain a route can follow (cells), whatever the lookahead. */
+const MAX_CHAIN = 64;
+/** Beyond turret range plus this, a target is far enough for the route to matter; closer, the fight is local. */
+const LOCAL_FIGHT = 2;
+/** How a truck's last plan aimed: from the truck field, straight (clear line), or straight as a fallback. */
+export const ROUTE_STATES = ['none', 'straight', 'route', 'disabled', 'no-graph', 'not-ready', 'unknown-cell'] as const;
+export type RouteState = typeof ROUTE_STATES[number];
+const STRAIGHT = 1, ROUTED = 2, DISABLED = 3, NO_GRAPH = 4, NOT_READY = 5, UNKNOWN_CELL = 6;
 
 class Route {
   mode: Maneuver = Maneuver.Hold;
@@ -18,6 +27,8 @@ class Route {
   speed = 0;
   target = -1;
   score = -Infinity;
+  /** Aimed along the truck route: scores progress as field distance, not straight-line distance. */
+  routed = false;
   readonly x = new Float64Array(SAMPLES);
   readonly z = new Float64Array(SAMPLES);
   readonly heading = new Float64Array(SAMPLES);
@@ -41,6 +52,18 @@ export class TruckTactics {
   private ramQuery = 0;
   private routeCount = 0;
   private detailLeft = 0;
+  /** Per truck: how its last plan aimed (index into ROUTE_STATES). */
+  readonly routeState: Uint8Array;
+  private readonly chain = new Int32Array(MAX_CHAIN);
+  /** The current plan's truck field: null when the plan falls back to straight lines. */
+  private routeNav: Navigation | null = null;
+  private routeField: Float32Array | null = null;
+  private routeStart = Infinity;
+  private routeYaw = NaN;
+  private escapeYaw = NaN;
+  private routeTargetX = NaN;
+  private routeTargetZ = NaN;
+  private routeUsed = false;
 
   private readonly f: VehicleFleet;
   constructor(f: VehicleFleet) {
@@ -50,6 +73,72 @@ export class TruckTactics {
     this.footCounts = new Uint16Array(f.grid.heads.length);
     this.truckCells = new Int32Array(f.active.length);
     this.ramStamp = new Uint32Array(f.sim.capacity);
+    this.routeState = new Uint8Array(f.active.length);
+  }
+
+  /** Reads the truck field at the truck's cell and follows it for one plan. Returns the fallback state, or 0. */
+  private prepareRoute(v: number) {
+    const f = this.f, t = f.sim.tuning;
+    this.routeNav = this.routeField = null; this.routeYaw = this.escapeYaw = NaN; this.routeStart = Infinity; this.routeUsed = false;
+    if (!t.truckPathing) return DISABLED;
+    if (!f.truckGraph) return NO_GRAPH;
+    const nav = f.truckFields.ready(f.team[v]);
+    if (!nav) return NOT_READY;
+    const field = nav.fields[f.team[v]].distance, node = nav.nodeAt(f.x[v], f.z[v]);
+    if (node < 0 || !Number.isFinite(field[node])) return UNKNOWN_CELL;
+    this.routeNav = nav; this.routeField = field; this.routeStart = field[node];
+    this.routeYaw = this.follow(v, nav, field, node, -1, true);
+    this.escapeYaw = this.follow(v, nav, field, node, 1, false);
+    return 0;
+  }
+
+  /**
+   * Follows the field from `node` for the route lookahead (downhill toward the enemy, or uphill away from it),
+   * then string-pulls: aims at the farthest chain cell a straight drive reaches past static obstacles.
+   * Returns the heading, or NaN when the truck already sits at a local extreme.
+   */
+  private follow(v: number, nav: Navigation, field: Float32Array, node: number, sign: number, record: boolean) {
+    const f = this.f, t = f.sim.tuning, x = f.x[v], z = f.z[v], chain = this.chain;
+    let current = node, walked = 0, length = 0;
+    while (walked < t.truckRouteLookahead && length < MAX_CHAIN) {
+      let best = -1, step = 0, score = field[current];
+      for (let dir = 0; dir < 8; dir++) if (nav.edges[current] & 1 << dir) {
+        const next = current + nav.offsets[dir], d = field[next];
+        if (Number.isFinite(d) && (sign < 0 ? d < score - 1e-5 : d > score + 1e-5)) { score = d; best = next; step = nav.costs[dir]; }
+      }
+      if (best < 0) break;
+      chain[length++] = current = best; walked += step;
+    }
+    if (!length) return NaN;
+    let pick = chain[0];
+    for (let k = length - 1; k > 0; k--) if (f.sim.terrain.driveClear(x, z, nav.x(chain[k]), nav.z(chain[k]), TRUCK.radius, t.truckSlope)) { pick = chain[k]; break; }
+    if (record) { this.routeTargetX = nav.x(pick); this.routeTargetZ = nav.z(pick); }
+    return Math.atan2(nav.x(pick) - x, nav.z(pick) - z);
+  }
+
+  /**
+   * The heading candidates for a target are built around: the straight line while it is clear of static obstacles
+   * for 1.5x the lookahead (open-field behaviour is unchanged) or the fight is local, otherwise the truck route.
+   */
+  private aim(v: number, tx: number, tz: number, toward: number, distance: number) {
+    const nav = this.routeNav;
+    if (!nav || !Number.isFinite(this.routeYaw) || distance <= (this.f.range ?? 0) + LOCAL_FIGHT) return toward;
+    const f = this.f, t = f.sim.tuning, x = f.x[v], z = f.z[v], goal = nav.nodeAt(tx, tz);
+    const gx = goal >= 0 ? nav.x(goal) : tx, gz = goal >= 0 ? nav.z(goal) : tz, length = Math.hypot(gx - x, gz - z);
+    const k = Math.min(1, 1.5 * t.truckRouteLookahead / Math.max(length, 1e-6));
+    if (f.sim.terrain.driveClear(x, z, x + (gx - x) * k, z + (gz - z) * k, TRUCK.radius, t.truckSlope)) return toward;
+    this.routeUsed = true;
+    return this.routeYaw;
+  }
+
+  private routeTrace(v: number): RouteTrace {
+    const routed = this.routeState[v] === ROUTED;
+    return {
+      state: ROUTE_STATES[this.routeState[v]], fieldDistance: Number.isFinite(this.routeStart) ? this.routeStart : null,
+      heading: Number.isFinite(this.routeYaw) ? this.routeYaw : null,
+      target: routed ? { x: this.routeTargetX, z: this.routeTargetZ } : null,
+      escape: Number.isFinite(this.escapeYaw) ? this.escapeYaw : null,
+    };
   }
 
   private refreshDensity() {
@@ -173,26 +262,34 @@ export class TruckTactics {
       trace?.decision(v, 'pickup', waiting, 0, [], null);
       return;
     }
-    let trafficAhead = 0;
+    const fallback = this.prepareRoute(v);
+    let trafficAhead = 0, firstAim = 0, firstRouted = false;
     for (let n = 0; n < this.groups.length; n++) {
       const i = this.groups[n];
       if (n && i < 0) break;
       const tx = i < 0 ? sim.centerX[enemy] : sim.x[i], tz = i < 0 ? sim.centerZ[enemy] : sim.z[i];
       const toward = Math.atan2(tx - x, tz - z), distance = Math.hypot(tx - x, tz - z);
-      if (n === 0) trafficAhead = this.add(v, Maneuver.Approach, toward, speed * 0.75, i);
-      else if (distance > standoff + 0.6) this.add(v, Maneuver.Approach, toward, speed * 0.75, i);
+      // Approach and both passes open around the route heading once a wall stands in the straight line.
+      const aim = this.aim(v, tx, tz, toward, distance), routed = aim !== toward;
+      if (n === 0) { firstAim = aim; firstRouted = routed; }
+      if (n === 0) trafficAhead = this.add(v, Maneuver.Approach, aim, speed * 0.75, i, routed);
+      else if (distance > standoff + 0.6) this.add(v, Maneuver.Approach, aim, speed * 0.75, i, routed);
       if (armed) {
         const offset = distance > standoff + 3 ? 0.72 : distance > standoff ? 1.12 : distance < standoff - 2.3 ? 2.10 : 1.59;
-        this.add(v, Maneuver.Pass, toward + offset, speed * 0.72, i);
-        this.add(v, Maneuver.Pass, toward - offset, speed * 0.72, i);
+        this.add(v, Maneuver.Pass, aim + offset, speed * 0.72, i, routed);
+        this.add(v, Maneuver.Pass, aim - offset, speed * 0.72, i, routed);
       }
       if (i >= 0 && t.truckRamAggression > 0 && distance < t.truckSpeed * 1.4 + 2) this.add(v, Maneuver.Ram, toward, t.truckSpeed, i);
     }
+    this.routeState[v] = fallback || (this.routeUsed ? ROUTED : STRAIGHT);
     const toward = this.groups[0] < 0 ? Math.atan2(sim.centerX[enemy] - x, sim.centerZ[enemy] - z)
       : Math.atan2(sim.x[this.groups[0]] - x, sim.z[this.groups[0]] - z);
+    // Recovery searches toward the gap the route leads to, not toward the enemy behind the wall.
     if (trafficAhead > 0 || f.blocked[v] || f.mode[v] === Maneuver.Detour) {
-      for (const angle of DETOUR_ANGLES) this.add(v, Maneuver.Detour, toward + angle, speed * 0.66, this.groups[0]);
+      for (const angle of DETOUR_ANGLES) this.add(v, Maneuver.Detour, firstAim + angle, speed * 0.66, this.groups[0], firstRouted);
     }
+    // Climbing the field retreats along drivable ground rather than straight back into a wall.
+    if (firstRouted && Number.isFinite(this.escapeYaw)) this.add(v, Maneuver.Escape, this.escapeYaw, speed * 0.8, this.groups[0]);
     this.add(v, Maneuver.Escape, toward + Math.PI, speed * 0.8, this.groups[0]);
     this.add(v, Maneuver.Escape, yaw, speed * 0.72, this.groups[0]);
     this.add(v, Maneuver.Escape, yaw + 0.62, speed * 0.66, this.groups[0]);
@@ -223,7 +320,7 @@ export class TruckTactics {
     if (best) {
       this.commit(v, best.mode, best.yaw, best.speed);
       if (gunner >= 0 && best.target >= 0 && (best.mode === Maneuver.Pass || best.mode === Maneuver.Approach)) sim.target[gunner] = sim.id[best.target];
-      if (trace && checks) trace.decision(v, 'route-selected', waiting, this.routeCount, checks, selectedCheck);
+      if (trace && checks) trace.decision(v, 'route-selected', waiting, this.routeCount, checks, selectedCheck, [], this.routeTrace(v));
       return;
     }
     // A truck can stop inside the planner's extra clearance after a collision.
@@ -245,7 +342,7 @@ export class TruckTactics {
       }
       const speed = direction * Math.min(2, reverse ? t.truckReverseSpeed : t.truckSpeed);
       this.commit(v, reverse ? Maneuver.Reverse : Maneuver.Escape, yaw, speed);
-      if (trace && checks) trace.decision(v, reverse ? 'fallback-reverse' : 'fallback-forward', waiting, this.routeCount, checks, null, recovery);
+      if (trace && checks) trace.decision(v, reverse ? 'fallback-reverse' : 'fallback-forward', waiting, this.routeCount, checks, null, recovery, this.routeTrace(v));
       return;
     }
     // A rock alongside the chassis can cut off both straight paths.
@@ -254,12 +351,12 @@ export class TruckTactics {
       for (const steering of RECOVERY_STEERING) {
         if (!this.checkSteeredReverse(v, steering, reverseSpeed, recovery)) continue;
         this.commit(v, Maneuver.Reverse, yaw + steering, reverseSpeed);
-        if (trace && checks) trace.decision(v, 'fallback-reverse', waiting, this.routeCount, checks, null, recovery);
+        if (trace && checks) trace.decision(v, 'fallback-reverse', waiting, this.routeCount, checks, null, recovery, this.routeTrace(v));
         return;
       }
     }
     this.commit(v, Maneuver.Hold, yaw, 0);
-    if (trace && checks) trace.decision(v, 'no-clear-route', waiting, this.routeCount, checks, null, recovery);
+    if (trace && checks) trace.decision(v, 'no-clear-route', waiting, this.routeCount, checks, null, recovery, this.routeTrace(v));
   }
 
   private checkSteeredReverse(v: number, steering: number, speed: number, recovery?: RecoveryCheck[]) {
@@ -295,9 +392,9 @@ export class TruckTactics {
     return { segment, from: { x, z }, to: { x: tx, z: tz }, blocker: { ...this.f.ground.lastBlocker } };
   }
 
-  private add(v: number, mode: Maneuver, heading: number, targetSpeed: number, target: number) {
+  private add(v: number, mode: Maneuver, heading: number, targetSpeed: number, target: number, routed = false) {
     const f = this.f, sim = f.sim, t = sim.tuning, route = this.routes[this.routeCount++];
-    route.mode = mode; route.yaw = heading; route.speed = targetSpeed; route.target = target;
+    route.mode = mode; route.yaw = heading; route.speed = targetSpeed; route.target = target; route.routed = routed;
     let x = f.x[v], z = f.z[v], yaw = f.yaw[v], speed = f.vx[v] * f.sin[v] + f.vz[v] * f.cos[v];
     const team = f.team[v], range = f.range ?? 0, rifle = sim.rifle.range, armed = f.seat(v, GUNNER) >= 0 && sim.weaponsEnabled;
     const tx = target < 0 ? sim.centerX[1 - team] : sim.x[target], tz = target < 0 ? sim.centerZ[1 - team] : sim.z[target];
@@ -332,7 +429,13 @@ export class TruckTactics {
         lane += Math.max(-2, 1.25 - Math.abs(nearest - stand) * 0.48);
       }
     }
-    const finish = Math.hypot(tx - x, tz - z), advance = initial - finish;
+    const finish = Math.hypot(tx - x, tz - z);
+    let advance = initial - finish;
+    // Along a route, progress is driving distance gained, so a dead end straight at the enemy scores none.
+    if (route.routed && this.routeField) {
+      const end = this.routeField[sim.terrain.cell(x, z)];
+      if (Number.isFinite(end)) advance = this.routeStart - end;
+    }
     const exitX = x + Math.sin(yaw) * Math.sign(targetSpeed) * 2.2, exitZ = z + Math.cos(yaw) * Math.sign(targetSpeed) * 2.2;
     const ahead = Math.log1p(this.enemiesNear(exitX, exitZ, team, 2));
     if (mode !== Maneuver.Ram) traffic += Math.log1p(this.count(exitX, exitZ, TRAFFIC, clearance, ownCell));
