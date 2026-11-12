@@ -1,6 +1,7 @@
 import { CONFIG } from './config.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, type TruckBlocker } from './vehicle-types.ts';
 import type { VehicleFleet } from './vehicles.ts';
+import type { Escalation } from './truck-recovery.ts';
 
 const STATIONARY_TICKS = Math.round(2 / CONFIG.step);
 const STATIONARY_RADIUS = 0.25;
@@ -59,6 +60,10 @@ type TraceEvent = EventStamp & (
   | { kind: 'stopped'; activity: Activity; sinceTick: number }
   | { kind: 'stop-ended'; reason: StopEnd }
   | { kind: 'destroyed' }
+  | { kind: 'escalation'; step: Escalation; stallSeconds: number }
+  | { kind: 'stuck'; sinceTick: number }
+  | { kind: 'unstuck' }
+  | { kind: 'livelock'; count: number }
 );
 
 interface Stop {
@@ -232,6 +237,21 @@ export class TruckTrace {
     });
   }
 
+  /** A recovery ladder step, from re-plan to crawl. */
+  escalation(v: number, step: Escalation, stallSeconds: number) {
+    this.append(this.history(v), { ...this.stamp(v), kind: 'escalation', step, stallSeconds });
+  }
+
+  /** The truck wanted to move and covered less than the stall radius for the stuck bound: the ladder failed. */
+  stuck(v: number, since: number) {
+    this.append(this.history(v), { ...this.stamp(v), kind: 'stuck', sinceTick: Math.round(since / CONFIG.step) });
+  }
+
+  unstuck(v: number) { this.append(this.history(v), { ...this.stamp(v), kind: 'unstuck' }); }
+
+  /** The ladder keeps restarting at the same spot. */
+  livelock(v: number, count: number) { this.append(this.history(v), { ...this.stamp(v), kind: 'livelock', count }); }
+
   destroy(v: number) {
     const history = this.history(v);
     history.retired = this.snapshot(v);
@@ -248,6 +268,7 @@ export class TruckTrace {
         stopCount: history.stopCount, lastStop: history.lastStop, droppedEvents: history.droppedEvents, events: history.events,
       };
     });
+    const stuckTruckIds = Array.from({ length: f.count }, (_, n) => f.active[n]).filter(v => f.recovery.stuck[v]).map(v => f.id[v]).sort((a, b) => a - b);
     const stoppedTruckIds = trucks.filter(truck => truck.active && truck.lastStop?.endedTick === null)
       .sort((a, b) => a.lastStop!.sinceTick - b.lastStop!.sinceTick || a.id - b.id).map(truck => truck.id);
     return structuredClone({
@@ -256,7 +277,9 @@ export class TruckTrace {
       battleSeed: sim.tuning.seed, terrainSeed: terrain.seed, map: terrain.archetype, bounds: { halfWidth: terrain.halfWidth, halfDepth: terrain.halfDepth },
       rocks: terrain.rocks, startingTuning: this.startingTuning, tuning: sim.tuning,
       stationary: { ticks: STATIONARY_TICKS, radius: STATIONARY_RADIUS },
-      recentEventLimit: RECENT_EVENTS, evictedTrucks: this.evicted, stoppedTruckIds, trucks,
+      recentEventLimit: RECENT_EVENTS, evictedTrucks: this.evicted, stoppedTruckIds, stuckTruckIds,
+      recovery: { stuck: f.metrics.stuck, livelocks: f.metrics.livelocks, yields: f.metrics.yields, retreats: f.metrics.retreats, crawls: f.metrics.crawls, makeWay: f.metrics.makeWay, displaced: f.metrics.displaced },
+      trucks,
     });
   }
 }

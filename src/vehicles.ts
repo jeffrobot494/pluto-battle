@@ -6,6 +6,7 @@ import { effectiveTurretRange } from './tuning.ts';
 import { TruckController } from './truck-controller.ts';
 import { TruckTactics } from './truck-tactics.ts';
 import { TruckTrace } from './truck-trace.ts';
+import { TruckRecovery } from './truck-recovery.ts';
 import { TruckFields, TruckGraph, needsTruckGraph } from './truck-navigation.ts';
 import type { Navigation } from './navigation.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, PULL_AWAY, SEAT_COUNT, TRUCK, TRUCK_TYPE, VEHICLE_TYPES } from './vehicle-types.ts';
@@ -62,6 +63,7 @@ export class VehicleFleet {
   readonly grid: SpatialGrid;
   readonly ground: TruckController;
   readonly tactics: TruckTactics;
+  readonly recovery: TruckRecovery;
   readonly byId = new Map<number, number>();
   readonly active: Int32Array;
   readonly id: Uint32Array;
@@ -131,6 +133,8 @@ export class VehicleFleet {
     paints: 0, painted: 0, boarded: 0, unplaced: 0, groupingMs: 0, placementMs: 0, placementChecks: 0,
     planningMs: 0, decisions: 0, detailedPaths: 0, queueDelay: 0, maxQueueDelay: 0,
     contactChecks: 0, contacts: 0, rams: 0, firingMs: 0, shots: 0, destructions: 0, peakTrucks: 0,
+    /** Recovery: trucks that stalled past the stuck bound, ladder loops at one spot, and each ladder step taken. */
+    stuck: 0, livelocks: 0, yields: 0, retreats: 0, crawls: 0, makeWay: 0, displaced: 0, placementIsolated: 0,
   };
 
   readonly sim: BattleSimulation;
@@ -162,6 +166,7 @@ export class VehicleFleet {
     this.paintFor = new Uint32Array(n); this.groupMark = new Uint8Array(n); this.groupDistance = new Float64Array(n); this.rayStamp = new Uint32Array(n);
     this.grid = new SpatialGrid(n, sim.grid.halfWidth, sim.grid.halfDepth, this.team);
     this.ground = new TruckController(this); this.tactics = new TruckTactics(this);
+    this.recovery = new TruckRecovery(this);
     this.truckFields = new TruckFields(this);
   }
 
@@ -245,6 +250,7 @@ export class VehicleFleet {
     this.setPose(v, x, z, yaw);
     this.previousX[v] = x; this.previousY[v] = this.y[v]; this.previousZ[v] = z;
     crew.forEach((i, role) => this.board(v, role, i));
+    this.recovery.reset(v);
     this.trace?.observe(v);
     return true;
   }
@@ -369,11 +375,50 @@ export class VehicleFleet {
       if (!this.ground.clear(-1, tx, tz, yaw, tx + Math.sin(yaw) * PULL_AWAY, tz + Math.cos(yaw) * PULL_AWAY, yaw, 0.025, 'all', slots)) continue;
       if (slots.some(i => Math.hypot(tx - sim.x[i], tz - sim.z[i]) > t.truckPlacementDistance + 1e-6
         || (sim.navigation && !sim.terrain.canTraverse(sim.x[i], sim.z[i], tx, tz, sim.radius[i])))) continue;
+      if (!this.reachesFight(sim.team[slots[0]], tx, tz)) { this.metrics.placementIsolated++; continue; }
       if (!this.spawn(tx, tz, yaw, slots)) return false;
       crew.job.boarded += slots.length; crew.job.trucks++; this.metrics.boarded += slots.length;
       return true;
     }
     return false;
+  }
+
+  /**
+   * A truck placed where the truck graph cannot reach the enemy or a firing position would never take part.
+   * Passes when the graph is not built yet, or there is nothing to reach.
+   */
+  private reachesFight(team: number, x: number, z: number) {
+    const nav = this.truckNavigation;
+    if (!nav) return true;
+    const node = nav.nodeAt(x, z);
+    if (node < 0) return false;
+    const field = this.truckFields.ready(team)?.fields[team].distance;
+    if (field && Number.isFinite(field[node])) return true;
+    const regions = this.enemyRegions(team, nav);
+    return regions.size === 0 || regions.has(nav.regions[node]);
+  }
+
+  private readonly regionCache = [new Set<number>(), new Set<number>()];
+  private readonly regionTick = [-1, -1];
+  private regionGraph: Navigation | null = null;
+  /** Truck-graph regions that hold the team's enemies (soldiers on foot and trucks), refreshed once per tick. */
+  private enemyRegions(team: number, nav: Navigation) {
+    const sim = this.sim, regions = this.regionCache[team];
+    if (this.regionTick[team] === sim.tick && this.regionGraph === nav) return regions;
+    if (this.regionGraph !== nav) { this.regionGraph = nav; this.regionTick[0] = this.regionTick[1] = -1; }
+    this.regionTick[team] = sim.tick; regions.clear();
+    for (let i = 0; i < sim.used; i++) {
+      if (sim.hp[i] <= 0 || sim.team[i] === team || !this.onFoot(i)) continue;
+      const node = nav.nodeAt(sim.x[i], sim.z[i]);
+      if (node >= 0) regions.add(nav.regions[node]);
+    }
+    for (let n = 0; n < this.count; n++) {
+      const v = this.active[n];
+      if (this.team[v] === team) continue;
+      const node = nav.nodeAt(this.x[v], this.z[v]);
+      if (node >= 0) regions.add(nav.regions[node]);
+    }
+    return regions;
   }
 
   private release(v: number, role: number) {
@@ -429,6 +474,8 @@ export class VehicleFleet {
   }
 
   requestRecovery(v: number) {
+    // A trail retreat steers itself until it ends, then asks for a fresh plan.
+    if (this.recovery.retreating(v)) return;
     this.blocked[v] = 1;
     if (this.urgent[v]) return;
     this.urgent[v] = 1; this.due[v] = Math.max(this.sim.time, this.recoverAt[v]);
@@ -458,7 +505,8 @@ export class VehicleFleet {
     this.ground.releaseContacts();
     for (let n = 0; n < this.count; n++) {
       const v = this.active[(this.sim.tick + (this.sim.tick % 2 ? n : this.count - n - 1)) % this.count];
-      if (VEHICLE_TYPES[this.type[v]].controller === 'ground') this.ground.drive(v);
+      if (VEHICLE_TYPES[this.type[v]].controller === 'ground' && !this.recovery.steer(v)) this.ground.drive(v);
+      this.recovery.update(v);
       this.boardRecruits(v);
       this.trace?.observe(v);
     }

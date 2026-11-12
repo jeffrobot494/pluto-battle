@@ -100,15 +100,27 @@ test('a truck can pull forward if its rear is against the map edge', () => {
 });
 
 test('a truck can steer in reverse when the same rock blocks both straight recoveries', () => {
+  // A canyon rock met with the front corner while turning (a pose taken from a full canyon battle).
   const seed = 74319;
   const tuning = { ...DEFAULT_TUNING, count: 20, columns: 5, seed };
   const { terrain, navigation } = prepareTerrain(tuning, seed, 'canyon');
-  const sim = new BattleSimulation(tuning.count, seed, CONFIG.capacity, tuning, terrain, navigation);
-  const trace = sim.vehicles.startTrace();
-  sim.queue({ type: 'deployTrucks', teams: 3, x: 0, z: 0, radius: Math.hypot(tuning.halfWidth, tuning.halfDepth) + 1 });
-  step(sim, 375);
+  const sim = new BattleSimulation(0, seed, 64, tuning, terrain, navigation);
+  sim.weaponsEnabled = false;
+  assert.ok(sim.spawn(0, -6.5, -13.5));
+  assert.ok(sim.spawn(1, 6, 12));
+  sim.queue({ type: 'deployTrucks', teams: 1, x: -6.5, z: -13.5, radius: 1 });
+  sim.flushCommands();
+  const fleet = sim.vehicles, v = fleet.active[0];
+  assert.equal(fleet.count, 1);
+  fleet.exitLeft[v] = 0;
+  fleet.setPose(v, -6.098, -11.514, 0.637);
+  fleet.previousX[v] = fleet.x[v]; fleet.previousZ[v] = fleet.z[v];
+  fleet.vx[v] = 1.93; fleet.vz[v] = 3.8; fleet.desiredYaw[v] = 0.66; fleet.desiredSpeed[v] = 7.88;
+  fleet.mode[v] = Maneuver.Approach; fleet.due[v] = fleet.committedUntil[v] = Infinity;
+  const trace = fleet.startTrace();
+  step(sim, 60);
 
-  const truck = trace.report().trucks.find(entry => entry.id === 7);
+  const [truck] = trace.report().trucks;
   assert.ok(truck?.snapshot);
   const contact = truck.events.find(event => event.kind === 'contact' && event.blocker.kind === 'rock' && event.blocker.id === 12);
   const decision = truck.events.find(event => event.kind === 'decision' && event.recovery.some(check => check.steering && !check.blockedBy));

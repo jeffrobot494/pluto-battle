@@ -4,7 +4,7 @@ import { DRIVER, Maneuver, TRUCK, angleDelta, type TruckBlocker } from './vehicl
 import type { VehicleFleet } from './vehicles.ts';
 
 const SKIN = 0.002;
-type FootTraffic = 'all' | 'allies';
+type FootTraffic = 'all' | 'allies' | 'none';
 
 /** Ground physics for the truck. Crew, weapons, and damage belong to the fleet. */
 export class TruckController {
@@ -15,6 +15,7 @@ export class TruckController {
   private readonly motion = { yaw: 0, vx: 0, vz: 0 };
   private readonly contactLatch = new Map<number, { truck: number; soldier: number }>();
   private contactFoot = -1;
+  private contactTruck = -1;
   private contactNX = 0;
   private contactNZ = 0;
   private contactSpeed = 0;
@@ -40,7 +41,7 @@ export class TruckController {
     const sin = Math.sin(yaw), cos = Math.cos(yaw), sn = Math.sin(tyaw), cs = Math.cos(tyaw);
     const radius = TRUCK.radius + clearance + TRUCK.reach * (1 - Math.cos(angleDelta(tyaw, yaw) * 0.5));
     if (blocker) blocker.padding = radius - TRUCK.radius;
-    this.contactFoot = -1;
+    this.contactFoot = this.contactTruck = -1;
     let fraction = 1;
     for (let k = 0; k < TRUCK.disks.length; k++) {
       const d = TRUCK.disks[k];
@@ -64,7 +65,7 @@ export class TruckController {
     const near = grid.row(Math.min(z, tz) - reach), far = grid.row(Math.max(z, tz) + reach);
     for (let row = near; row <= far; row++) for (let col = left; col <= right; col++) {
       const cell = row * grid.columns + col;
-      for (let i = grid.heads[cell]; i >= 0; i = grid.next[i]) {
+      for (let i = feet === 'none' ? -1 : grid.heads[cell]; i >= 0; i = grid.next[i]) {
         if (feet === 'allies' && sim.team[i] !== f.team[v]) continue;
         if (!f.onFoot(i) || ignore?.includes(i) || sim.y[i] > y + TRUCK.hull.top + 0.02 || sim.y[i] + CONFIG.soldier.height < y) continue;
         const dist = this.sweepDisks(sim.x[i], sim.z[i], radius + sim.radius[i] + SKIN, fraction);
@@ -73,7 +74,7 @@ export class TruckController {
           blocker.kind = 'infantry'; blocker.id = sim.id[i]; blocker.x = sim.x[i]; blocker.z = sim.z[i]; blocker.atStart = dist === 0;
         }
         if (!truncate) return dist;
-        fraction = dist; this.contactFoot = i;
+        fraction = dist; this.contactFoot = i; this.contactTruck = -1;
       }
       for (let other = trucks.heads[cell]; other >= 0; other = trucks.next[other]) {
         if (other === v || Math.abs(f.y[other] - y) > TRUCK.hull.top + 0.24) continue;
@@ -85,7 +86,7 @@ export class TruckController {
             blocker.kind = 'truck'; blocker.id = f.id[other]; blocker.x = f.x[other]; blocker.z = f.z[other]; blocker.atStart = dist === 0;
           }
           if (!truncate) return dist;
-          fraction = dist; this.contactFoot = -1;
+          fraction = dist; this.contactFoot = -1; this.contactTruck = other;
         }
       }
     }
@@ -228,6 +229,7 @@ export class TruckController {
       if (f.exitLeft[v] === 0) f.due[v] = Math.max(sim.time, f.due[v]);
     }
     f.vx[v] = sx; f.vz[v] = sz;
+    f.recovery.blockerTruck[v] = this.contactTruck;
     if (fraction === 1) { f.stalledTicks[v] = 0; return; }
     f.stalledTicks[v] = travel > 0.35 ? 0 : Math.min(255, f.stalledTicks[v] + 1);
     f.metrics.contacts++;
