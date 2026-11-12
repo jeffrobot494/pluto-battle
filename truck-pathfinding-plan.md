@@ -1,6 +1,6 @@
 # Pluto Battle truck pathfinding plan
 
-Give armored trucks real routes around walls, cliffs, rock fields and canyon chokepoints. Battlefields are growing to about 5× their current area (about 2.24× each side). Pathfinding must add no measurable frame cost and must stay deterministic so replays still work.
+Give armored trucks real routes around walls, cliffs, rock fields and canyon chokepoints, and make sure no truck ever stays stuck (see [Zero stuck trucks](#6-zero-stuck-trucks)). Battlefields are growing to about 5× their current area (about 2.24× each side). Pathfinding must add no measurable frame cost and must stay deterministic so replays still work.
 
 ## Why trucks get stuck today
 
@@ -100,6 +100,41 @@ All changes are in `TruckTactics`. The controller doesn't change.
 - Add a `route` block to the truck trace: field ready or not, the truck cell's field distance, the chosen route heading, the string-pull target, and the fallback reason. Add metrics: `routeQueries`, `routeFallbacks` by reason, truck-field expansions per tick, early stops, full-sweep builds and graph `buildMs`.
 - `npm run debug:trucks` prints how many stops happened with an active route compared with a fallback.
 
+### 6. Zero stuck trucks
+
+Pathfinding fixes the commonest cause, routing into a dead end, but it doesn't remove every cause. Getting to zero needs a precise definition of "stuck" and a fix for each cause that can't be routed around.
+
+**Definition.** A truck is *stuck* when it has a driver, wants to move, and covers less than 0.25 units in 2 s of simulation time. "Wants to move" means `desiredSpeed ≠ 0`, or a Hold chosen as `no-clear-route`. The 0.25-unit, 2 s rule is the trace's existing one. Deliberate stops are excluded and reported separately:
+
+- waiting at a pickup (`Pickup`, bounded by `truckReservationTime`)
+- standing still while boarding
+- driverless trucks
+
+If any deliberate stop runs past its bound, it counts as stuck.
+
+**Every cause and its fix.**
+
+| Cause | Fix | Why it can't recur |
+|---|---|---|
+| Route into a static dead end | The truck fields (sections 1–4) | The field only leads through cells and edges that pass `driveClear` |
+| Deployed where no route leads to the fight (an isolated plateau, a pocket between rocks) | **Placement uses the truck graph.** A truck may only be placed on a cell whose truck region reaches an enemy-reachable cell or a turret firing position. Placement retries as it does now if no such cell is nearby. | Every placed truck starts with a finite field distance |
+| Long footprint wedged in a bend or slot that the disk-based grid let through | **Trail retreat.** Each truck records its last 40 poses, one every 0.5 units driven (about 20 units of road). When escalation reaches this step, the truck reverses along the recorded poses. The field also adds a penalty for cells narrower than `TRUCK.reach`. | Terrain doesn't change, so the poses the truck already drove through are statically clear |
+| Two trucks blocking each other | **Yield order.** When the controller's blocker is another truck that is also blocked, the truck with the higher `id` yields: it trail-retreats while the other holds for 0.5 s. | One side always moves, and the order is deterministic |
+| A friendly crowd that won't step aside | **Make way.** Allied soldiers in the truck's planned path receive a yield request. They get a sideways move through the existing `detourSide` push, at full strength. | Infantry already make way at low speed; this makes it active, not only a reaction to contact |
+| Boxed in by bodies (soldiers of either army, against a wall or another truck) with nowhere to step | **Last resort, 1.5 s into a stall.** The truck creeps forward at crawl speed, and each soldier it touches is displaced to the nearest free standing spot found by the existing placement search. Soldiers take no damage. | There's always a spot: the search widens until it finds one, and soldiers never block static terrain |
+| Field not ready, or the truck in an unknown cell | Fallback to today's planner, and trail retreat if that stalls | Same escalation as above |
+
+**Escalation ladder.** The stall timer counts simulation time without 0.25 units of progress. Each step must hand over well before the 2 s threshold:
+
+1. 0.2 s: urgent re-plan (the existing `requestRecovery`), with Detour now built around the route heading.
+2. 0.6 s: yield order against other trucks, and a make-way request to allies.
+3. 1.0 s: trail retreat for up to 3 units, then re-plan.
+4. 1.5 s: last-resort crawl.
+
+Any 0.25 units of progress resets the timer. A truck that keeps re-entering the ladder at the same spot is a *loop*, not a stall; the trace reports it as `livelock` and the validation counts it as stuck.
+
+**The one gameplay call.** The last-resort step moves soldiers who could not move on their own. It's the only way to guarantee no stalls when a truck is physically surrounded, and it should be rare. If you'd rather not have it, the alternative is that the crew dismounts after 4 s boxed in, and that truck no longer counts as crewed.
+
 ## Cost summary at 5× area
 
 All figures are estimates to be replaced by phase 1 measurements.
@@ -138,12 +173,24 @@ Each phase lands as its own commit with `npm test` passing.
    - the open field picks the same routes as before
    - an unreachable plateau leads to a firing position at its foot
    - each fallback reason is triggered
-6. **Diagnostics and tuning.** Add the trace `route` block, the metrics and the two Tuning entries, then update the README's truck and diagnostics sections.
-7. **Validate and tune.** Tune lookahead, `narrowPenalty`, the early-stop margin and the per-tick budget against the targets below, then record the results in the validation file.
+6. **Zero stuck trucks.** Add the stuck definition to the trace and metrics, placement on the truck graph, the pose trail and trail retreat, truck yield order, make-way requests, the last-resort crawl and livelock detection. Tests in `tests/vehicles.test.ts`, one for each row of the cause table:
+   - a truck placed on a truck-isolated plateau is rejected
+   - a truck wedged in a bend it drove into backs out along its trail
+   - two trucks nose to nose in a one-lane gap both get through
+   - a truck inside a packed allied crowd moves within 2 s
+   - a truck surrounded by soldiers against a wall moves within 2 s, and no soldier ends up overlapping anything
+   - none of these tests ever reaches the 2 s stuck threshold
+7. **Diagnostics and tuning.** Add the trace `route` block, the metrics and the two Tuning entries, then update the README's truck and diagnostics sections.
+8. **Validate and tune.** Tune lookahead, `narrowPenalty`, the early-stop margin and the per-tick budget against the targets below, then record the results in the validation file.
 
 ## Validation targets
 
-- **Fewer stops.** At 5× area on canyon and the long-wall archetypes, stopped trucks (the trace's existing 0.25 u for 2 s rule) fall by at least 70% against the phase 1 baseline. Hold and Reverse time fall too.
+- **Zero stuck trucks.** Using the definition in section 6, no truck is stuck and no livelock occurs anywhere in the corpus:
+  - every terrain archetype, with at least 20 terrain seeds each
+  - all three vehicle workloads, plus a 5× area variant of each
+  - runs of at least 3 minutes of simulation time
+
+  This is a hard gate, not a percentage. Add it to `npm run debug:trucks` as a failing exit code, and keep a smaller version in `npm test`. Any stuck truck found later becomes a new regression test and a new row in the cause table.
 - **No open-field regression.** On flat and open maps, contacts, rams, turret shots and wrecks in `vehicle-validation.md`'s three workloads stay within noise of today's numbers.
 - **Performance.**
   - Navigation ms per tick, infantry and trucks together, rises by no more than 10% over the infantry-only figure at the same map size.
@@ -159,7 +206,6 @@ Each phase lands as its own commit with `npm test` passing.
 - Hierarchical sectors. The 5× area doesn't need them, and the [hierarchical plan](hierarchical-navigation-plan.md) covers both profiles once it lands.
 - Per-truck or per-squad goals (for example, a truck routed to a specific soldier).
 - Moving vehicles in the field, such as wrecks as obstacles. The local sweeps handle these.
-- Truck placement that checks truck connectivity before boarding. Track it with the trace's fallback counts first.
 
 ## Open questions
 
