@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { Navigation, NavigationBuild, infantryProfile, prepareTerrain, type NavigationProfile } from '../src/navigation.ts';
 import { Terrain } from '../src/terrain.ts';
 import { BattleSimulation } from '../src/simulation.ts';
-import { TRUCK_BUILD_CELLS_PER_TICK, TRUCK_GRAPH_RADIUS, TruckGraph, truckProfile } from '../src/truck-navigation.ts';
+import { TRUCK_BUILD_CELLS_PER_TICK, TRUCK_FIELD_BUDGET, TRUCK_FIELD_MARGIN, TRUCK_GRAPH_RADIUS, TruckGraph, truckProfile } from '../src/truck-navigation.ts';
 import { TRUCK } from '../src/vehicle-types.ts';
 import { ARCHETYPES } from '../src/terrain-archetypes.ts';
-import { DEFAULT_TUNING } from '../src/tuning.ts';
+import { DEFAULT_TUNING, effectiveTurretRange } from '../src/tuning.ts';
 
 const DX = [1, 0, -1, 0, 1, -1, -1, 1], DZ = [0, 1, 0, -1, 1, 1, -1, -1];
 
@@ -204,4 +204,68 @@ test('flat battles have no truck graph', () => {
   const terrain = Terrain.flat(DEFAULT_TUNING.halfWidth, DEFAULT_TUNING.halfDepth);
   const explicit = new BattleSimulation(20, 9, 512, DEFAULT_TUNING, terrain, new Navigation(terrain, DEFAULT_TUNING.radius));
   for (const sim of [plain, explicit]) { for (let t = 0; t < 5; t++) sim.step(); assert.equal(sim.vehicles.truckGraph, null); assert.equal(sim.vehicles.truckNavigation, null); }
+});
+
+test('an early-stopped truck field holds full-sweep distances on every cell it settles', () => {
+  const tuning = { ...DEFAULT_TUNING, count: 60, columns: 8 }, range = effectiveTurretRange(tuning)!;
+  assert.ok(range > tuning.range);
+  for (const id of ['canyon', 'escarpment', 'massif']) {
+    const { terrain } = prepareTerrain(tuning, 404, id);
+    const early = new TruckGraph(terrain).finish(tuning.truckSlope), full = new Navigation(terrain, truckProfile(tuning.truckSlope));
+    // Enemies around the far deployment line; trucks near our own, as at the start of a battle.
+    const goals = new Int32Array(40), watch = new Int32Array(3);
+    for (let i = 0; i < goals.length; i++) goals[i] = early.nodeAt(-12 + (i % 10) * 2.6, -tuning.frontline + Math.floor(i / 10) * 1.3);
+    for (let i = 0; i < watch.length; i++) watch[i] = early.nodeAt(-6 + i * 6, tuning.frontline - 4);
+    const margin = tuning.truckRouteLookahead + TRUCK_FIELD_MARGIN;
+    assert.ok(early.beginField(0, goals, goals.length, undefined, 0, 0, range));
+    early.stopWhenSettled(0, watch, watch.length, margin);
+    assert.equal(early.beginField(0, goals, goals.length, undefined, 0, 0, range), false, 'a running build is not restarted');
+    let ticks = 0;
+    while (!early.fields[0].ready) { early.advance(TRUCK_FIELD_BUDGET); assert.ok(early.expansions <= TRUCK_FIELD_BUDGET); assert.ok(++ticks < 5000); }
+    full.beginField(0, goals, goals.length, undefined, 0, 0, range);
+    while (!full.fields[0].ready) full.advance(4096);
+    const a = early.fields[0], b = full.fields[0];
+    assert.equal(b.complete, true); assert.ok(b.firingSeeds > 0, `${id}: turret range seeds vantage cells`);
+    let known = 0, reachable = 0, farthest = 0;
+    for (const n of watch) if (n >= 0 && Number.isFinite(b.distance[n])) { assert.ok(Number.isFinite(a.distance[n]), `${id}: truck cell settled`); farthest = Math.max(farthest, b.distance[n]); }
+    for (let n = 0; n < a.distance.length; n++) {
+      if (Number.isFinite(b.distance[n])) reachable++;
+      if (Number.isFinite(a.distance[n])) { known++; assert.equal(a.distance[n], b.distance[n], `${id} cell ${n}`); }
+      else if (b.distance[n] <= farthest + margin) assert.fail(`${id}: cell ${n} at ${b.distance[n]} within the margin was left unknown`);
+    }
+    assert.equal(a.settled, known);
+    if (!a.complete) { assert.ok(known < reachable); assert.equal(a.earlyStops, 1); }
+    // Watched cells nobody can reach keep the sweep going to the end.
+    const seeded = new Set(Array.from(goals).filter(g => g >= 0).map(g => early.regions[g]));
+    const isolated = new Int32Array([early.walkable.findIndex((w, n) => w && !seeded.has(early.regions[n]))]);
+    if (isolated[0] >= 0) {
+      early.beginField(1, goals, goals.length); early.stopWhenSettled(1, isolated, 1, margin);
+      while (!early.fields[1].ready) early.advance(4096);
+      assert.equal(early.fields[1].complete, true, `${id}: unreachable truck forces a full sweep`);
+    }
+  }
+});
+
+test('truck fields run only for teams with trucks, within budget, and repeat exactly', () => {
+  const run = () => {
+    const tuning = { ...DEFAULT_TUNING, count: 24, columns: 6 };
+    const { terrain, navigation } = prepareTerrain(tuning, 505, 'massif');
+    const sim = new BattleSimulation(24, 6, 256, tuning, terrain, navigation), fleet = sim.vehicles;
+    sim.weaponsEnabled = false;
+    while (!fleet.truckNavigation) sim.step();
+    const nav = fleet.truckNavigation;
+    for (let t = 0; t < 90; t++) { sim.step(); assert.equal(nav.expansions, 0, 'no field work without trucks'); }
+    assert.deepEqual(fleet.truckFields.builds, [0, 0]); assert.ok(!nav.fields[0].building && !nav.fields[1].building);
+    let x = 0, z = 0, n = 0;
+    for (let i = 0; i < sim.used; i++) if (sim.team[i] === 0 && sim.hp[i] > 0) { x += sim.x[i]; z += sim.z[i]; n++; }
+    sim.queue({ type: 'deployTrucks', x: x / n, z: z / n, radius: 9, teams: 1, solo: false }); sim.flushCommands();
+    for (let t = 0; t < 30; t++) sim.step();
+    assert.ok(fleet.count > 0, 'trucks placed');
+    for (let t = 0; t < 300; t++) { sim.step(); assert.ok(nav.expansions <= TRUCK_FIELD_BUDGET); }
+    assert.ok(nav.fields[0].ready); assert.ok(fleet.truckFields.builds[0] >= 2, 'restarted on the field cadence');
+    assert.equal(fleet.truckFields.builds[1], 0, 'the team with no trucks never builds');
+    return { distance: nav.fields[0].distance.slice(), builds: fleet.truckFields.builds.slice(), trucks: fleet.count };
+  };
+  const a = run(), b = run();
+  assert.deepEqual(a, b);
 });

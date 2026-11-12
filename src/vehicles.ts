@@ -6,7 +6,7 @@ import { effectiveTurretRange } from './tuning.ts';
 import { TruckController } from './truck-controller.ts';
 import { TruckTactics } from './truck-tactics.ts';
 import { TruckTrace } from './truck-trace.ts';
-import { TruckGraph, needsTruckGraph } from './truck-navigation.ts';
+import { TruckFields, TruckGraph, needsTruckGraph } from './truck-navigation.ts';
 import type { Navigation } from './navigation.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, PULL_AWAY, SEAT_COUNT, TRUCK, TRUCK_TYPE, VEHICLE_TYPES } from './vehicle-types.ts';
 
@@ -136,6 +136,8 @@ export class VehicleFleet {
   readonly sim: BattleSimulation;
   /** Builds and owns the truck graph; null on flat, rockless battles, where straight lines are already best. */
   readonly truckGraph: TruckGraph | null;
+  /** Truck flow fields on the truck graph (unused while it is null). */
+  readonly truckFields: TruckFields;
   constructor(sim: BattleSimulation) {
     this.sim = sim;
     // Started with the terrain, not on the first paint, so painting trucks never stalls a frame on a graph build.
@@ -160,13 +162,18 @@ export class VehicleFleet {
     this.paintFor = new Uint32Array(n); this.groupMark = new Uint8Array(n); this.groupDistance = new Float64Array(n); this.rayStamp = new Uint32Array(n);
     this.grid = new SpatialGrid(n, sim.grid.halfWidth, sim.grid.halfDepth, this.team);
     this.ground = new TruckController(this); this.tactics = new TruckTactics(this);
+    this.truckFields = new TruckFields(this);
   }
 
   get range() { return effectiveTurretRange(this.sim.tuning); }
   /** The published truck graph: null on flat battles and until the first build completes. */
   get truckNavigation(): Navigation | null { return this.truckGraph?.navigation ?? null; }
-  /** Advances the truck graph build a budgeted slice; a live `truckSlope` change starts a rebuild. */
-  updateNavigation() { this.truckGraph?.update(this.sim.tuning.truckSlope); }
+  /** Advances the truck graph build a budgeted slice (a live `truckSlope` change starts a rebuild), then the truck fields. */
+  updateNavigation() {
+    if (!this.truckGraph) return;
+    this.truckGraph.update(this.sim.tuning.truckSlope);
+    this.truckFields.update(this.truckGraph.navigation);
+  }
   get pendingCrews() { return this.placement.length - this.placementHead; }
   get pendingDestructions() { return this.wrecks.length - this.wreckHead; }
   onFoot(i: number) { return this.ride[i] < 0 && !this.awaitingEjection[i]; }

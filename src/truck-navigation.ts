@@ -1,11 +1,18 @@
 import { Navigation, NavigationBuild, type NavigationProfile } from './navigation.ts';
 import type { Terrain } from './terrain.ts';
-import { TRUCK } from './vehicle-types.ts';
+import { DRIVER as DRIVER_SEAT, TRUCK } from './vehicle-types.ts';
+import type { VehicleFleet } from './vehicles.ts';
 
 /** Disk radius the truck graph is built at: the controller's footprint disk plus a little turning slack. */
 export const TRUCK_GRAPH_RADIUS = TRUCK.radius + 0.05;
 /** Cells of truck graph work per simulation tick (see NavigationBuild). Counted in cells, so builds stay deterministic. */
 export const TRUCK_BUILD_CELLS_PER_TICK = 300;
+/** Field expansions per tick, both teams together. Counted in heap pops, so field builds stay deterministic. */
+export const TRUCK_FIELD_BUDGET = 512;
+/** Ticks between truck field restarts (the infantry cadence). */
+export const TRUCK_FIELD_PERIOD = 60;
+/** Field units settled past the farthest truck beyond its lookahead, so a truck's route never runs into unknown cells. */
+export const TRUCK_FIELD_MARGIN = 4;
 
 /** Trucks: the controller's own clearance test (`driveClear`), with room to swing the reach while turning. */
 export function truckProfile(slope: number): NavigationProfile & { slope: number } {
@@ -50,4 +57,65 @@ export class TruckGraph {
   finish(slope: number) { this.update(slope, Infinity); return this.navigation!; }
   /** Share of the current build done, 0–1; 1 when nothing is pending. */
   get progress() { return this.build ? this.build.progress : 1; }
+}
+
+/**
+ * The two truck fields (driving distance to the nearest enemy, per team) on the published truck graph.
+ * Seeds are enemy soldiers on foot and enemy trucks, snapped to truck-usable cells, plus cells with a turret
+ * shot at them. A team's field only runs while it has a crewed truck, and each build stops once it has
+ * settled the cells around that team's trucks.
+ */
+export class TruckFields {
+  private readonly fleet: VehicleFleet;
+  private readonly goals: Int32Array[];
+  private readonly watch: Int32Array[];
+  private readonly goalCount = [0, 0];
+  private readonly watchCount = [0, 0];
+  private navigation: Navigation | null = null;
+  /** Field builds started, per team (diagnostics and tests). */
+  readonly builds = [0, 0];
+  constructor(fleet: VehicleFleet) {
+    this.fleet = fleet;
+    const n = fleet.sim.capacity;
+    this.goals = [new Int32Array(2 * n), new Int32Array(2 * n)]; this.watch = [new Int32Array(n), new Int32Array(n)];
+  }
+  /** The published field for `team`, or null while it has none yet (or the graph is still building). */
+  ready(team: number) { return this.navigation?.fields[team].ready ? this.navigation : null; }
+  /** Restarts due fields and advances the running ones by the shared budget. Call once per tick. */
+  update(navigation: Navigation | null) {
+    if (!navigation) return;
+    const fleet = this.fleet, sim = fleet.sim, fresh = navigation !== this.navigation;
+    this.navigation = navigation;
+    // Crewed trucks per team; their cells are where the field must be known.
+    this.watchCount[0] = this.watchCount[1] = 0;
+    for (let k = 0; k < fleet.count; k++) {
+      const v = fleet.active[k], team = fleet.team[v];
+      if (fleet.hp[v] <= 0 || fleet.seat(v, DRIVER_SEAT) < 0) continue;
+      this.watch[team][this.watchCount[team]++] = navigation.nodeAt(fleet.x[v], fleet.z[v]);
+    }
+    const restart = (team: number) => {
+      const f = navigation.fields[team];
+      if (!this.watchCount[team] || f.building) return false;
+      return fresh || !f.ready || sim.tick % TRUCK_FIELD_PERIOD === 0;
+    };
+    const due = [restart(0), restart(1)];
+    if (due[0] || due[1]) {
+      this.goalCount[0] = this.goalCount[1] = 0;
+      for (let i = 0; i < sim.used; i++) if (sim.hp[i] > 0 && fleet.ride[i] < 0) {
+        const team = 1 - sim.team[i]; if (!due[team]) continue;
+        this.goals[team][this.goalCount[team]++] = navigation.nodeAt(sim.x[i], sim.z[i]);
+      }
+      for (let k = 0; k < fleet.count; k++) {
+        const v = fleet.active[k], team = 1 - fleet.team[v];
+        if (due[team] && fleet.hp[v] > 0) this.goals[team][this.goalCount[team]++] = navigation.nodeAt(fleet.x[v], fleet.z[v]);
+      }
+      const range = fleet.range ?? 0, margin = sim.tuning.truckRouteLookahead + TRUCK_FIELD_MARGIN;
+      for (let team = 0; team < 2; team++) if (due[team] && navigation.beginField(team, this.goals[team], this.goalCount[team], undefined, 0, 0, range)) {
+        navigation.stopWhenSettled(team, this.watch[team], this.watchCount[team], margin);
+        this.builds[team]++;
+      }
+    }
+    if (navigation.fields[0].building || navigation.fields[1].building) navigation.advance(TRUCK_FIELD_BUDGET);
+    else navigation.expansions = 0;
+  }
 }

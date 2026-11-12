@@ -8,7 +8,8 @@ class Heap {
   readonly nodes: Int32Array;
   readonly positions: Int32Array;
   length = 0;
-  readonly scores: Float32Array;
+  /** Not readonly: a field publishing by buffer swap points its heap at the new back buffer. */
+  scores: Float32Array;
   constructor(scores: Float32Array) { this.scores = scores; this.nodes = new Int32Array(scores.length); this.positions = new Int32Array(scores.length).fill(-1); }
   clear() { this.length = 0; this.positions.fill(-1); }
   push(node: number) {
@@ -78,8 +79,10 @@ export function infantryProfile(radius: number): NavigationProfile {
 }
 
 class FlowField {
-  readonly distance: Float32Array;
-  readonly pending: Float32Array;
+  /** The published field (front buffer). Swapped with `pending` on publish, never copied. */
+  distance: Float32Array;
+  /** The field being built (back buffer), and the heap's scores. */
+  pending: Float32Array;
   readonly heap: Heap;
   /** Extra cost multiplier per node from friendly crowding, snapshotted when the build begins. */
   readonly congestion: Float32Array;
@@ -100,6 +103,18 @@ class FlowField {
   seeding = false;
   ready = false;
   building = false;
+  /** Early stop (see `stopWhenSettled`): watched cells are stamped with the build number. */
+  watchMark: Uint32Array | null = null;
+  watchBuild = 0;
+  watchLeft = 0;
+  watchMax = 0;
+  watchMargin = 0;
+  watching = false;
+  /** Whether the published field covers every reachable cell (false after an early stop). */
+  complete = false;
+  /** Builds that ended early, and cells settled by the last build (diagnostics). */
+  earlyStops = 0;
+  settled = 0;
   constructor(size: number, blocks: number) {
     this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending);
     this.congestion = new Float32Array(size); this.firing = new Uint32Array(size); this.screen = new Uint8Array(size); this.reps = new Int32Array(blocks); this.candidates = new Int32Array(size);
@@ -311,15 +326,31 @@ export class Navigation {
    * this field) add a congestion cost so overflow spreads onto alternate routes instead of piling into one lane.
    * A positive `fireRange` also seeds cells that have a shot at the goals, so the field leads to vantage
    * points (e.g. a cliff overlooking the enemy) that have no short walking route to them.
+   * Returns whether a new build started (false while the previous one is still running, or with no goals).
    */
   beginField(team: number, goals: Int32Array, length: number, occupants?: Int32Array, occupantCount = 0, weight = 0, fireRange = 0) {
-    const f = this.fields[team]; if (f.building) return;
+    const f = this.fields[team]; if (f.building) return false;
     this.computeCongestion(f, occupants, occupantCount, weight);
-    f.pending.fill(Infinity); f.heap.clear(); f.build++; f.firingSeeds = 0; f.candidateCount = f.cursor = 0;
+    f.pending.fill(Infinity); f.heap.clear(); f.build++; f.firingSeeds = 0; f.candidateCount = f.cursor = 0; f.watching = false; f.settled = 0;
     for (let i = 0; i < length; i++) { const node = goals[i]; if (node >= 0 && this.walkable[node] && f.pending[node] !== 0) { f.pending[node] = 0; f.heap.push(node); } }
     f.building = f.heap.length > 0;
     if (fireRange > FIRE_MARGIN && f.building) this.gatherFiring(f, goals, length, fireRange - FIRE_MARGIN);
     f.seeding = f.candidateCount > 0;
+    return f.building;
+  }
+  /**
+   * Lets the build just begun for `team` stop early: once every walkable cell in `nodes` is settled and the next
+   * cell would be more than `margin` beyond the farthest of them. Cells left unsettled publish as Infinity
+   * (unknown); settled cells hold exactly what a full sweep would give. Unreachable watched cells keep the
+   * sweep running to the end. Call right after `beginField`; it has no effect if that build did not start.
+   */
+  stopWhenSettled(team: number, nodes: Int32Array, count: number, margin: number) {
+    const f = this.fields[team]; if (!f.building || f.watchBuild === f.build) return;
+    f.watchBuild = f.build;
+    const mark = f.watchMark ??= new Uint32Array(this.walkable.length);
+    f.watchLeft = 0; f.watchMax = 0; f.watchMargin = margin;
+    for (let i = 0; i < count; i++) { const node = nodes[i]; if (node >= 0 && this.walkable[node] && mark[node] !== f.build) { mark[node] = f.build; f.watchLeft++; } }
+    f.watching = f.watchLeft > 0;
   }
   /** Picks one sight target per FIRE_BLOCK block of goals and lists the walkable cells within `range` of any. */
   private gatherFiring(f: FlowField, goals: Int32Array, length: number, range: number) {
@@ -415,14 +446,26 @@ export class Navigation {
     for (let turn = 0; turn < budget; turn++) {
       const f = sweeping(this.fields[turn & 1]) ? this.fields[turn & 1] : this.fields[1 - (turn & 1)];
       if (!sweeping(f)) break;
-      const node = f.heap.pop(); this.expansions++;
+      const node = f.heap.pop(); this.expansions++; f.settled++;
       for (let dir = 0; dir < 8; dir++) if (this.edges[node] & 1 << dir) {
         const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * (this.crowding[next] + f.congestion[next]) + Math.abs(this.elevation[node] - this.elevation[next]) * elevationCost;
         if (cost < f.pending[next] - 1e-5) { f.pending[next] = cost; f.heap.push(next); }
       }
-      if (!f.heap.length) { f.distance.set(f.pending); f.ready = true; f.building = false; }
+      if (!f.heap.length) this.publish(f, true);
+      else if (f.watching) {
+        if (f.watchMark![node] === f.build) { f.watchLeft--; f.watchMax = Math.max(f.watchMax, f.pending[node]); }
+        if (!f.watchLeft && f.pending[f.heap.nodes[0]] > f.watchMax + f.watchMargin) {
+          // Tentative values are only upper bounds: publish them as unknown, not as distances.
+          for (let k = 0; k < f.heap.length; k++) f.pending[f.heap.nodes[k]] = Infinity;
+          f.heap.clear(); f.earlyStops++; this.publish(f, false);
+        }
+      }
     }
     this.totalExpansions += this.expansions;
+  }
+  private publish(f: FlowField, complete: boolean) {
+    const front = f.distance; f.distance = f.pending; f.pending = front; f.heap.scores = front;
+    f.ready = true; f.building = false; f.watching = false; f.complete = complete;
   }
   direction(team: number, x: number, z: number) {
     const node = this.terrain.cell(x, z), f = this.fields[team];
