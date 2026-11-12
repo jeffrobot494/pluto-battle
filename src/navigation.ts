@@ -32,8 +32,6 @@ class Heap {
     return result;
   }
 }
-/** Field cost multiplier rises from 1 in the open to 1 + NARROW_PENALTY in a one-cell slot. */
-const OPEN_CLEARANCE = 2.6, NARROW_PENALTY = 4;
 /** Clearance an army approach must keep end to end (distance from a cell centre to the nearest blocked cell). */
 export const WIDE_CLEARANCE = 1.25;
 /** Friendly density (soldiers per cell, 3x3-averaged) where the congestion cost starts and where it saturates.
@@ -42,12 +40,43 @@ const CONGESTION_START = 0.5, CONGESTION_FULL = 1.4;
 /** Firing positions: enemies are bucketed into FIRE_BLOCK x FIRE_BLOCK cell blocks (one sight target each).
  * A cell with a shot at one is seeded at its straight-line distance + FIRE_SLACK, so it only beats walking
  * where the route is much longer than the shot (cliff tops, ledges, across gaps). FIRE_MARGIN keeps seeds
- * inside real range while enemies move between rebuilds; FIRE_EYE matches the soldiers' sight height. */
-const FIRE_BLOCK = 4, FIRE_SLACK = 3, FIRE_MARGIN = 0.6, FIRE_EYE = 0.7;
+ * inside real range while enemies move between rebuilds; the profile's fireEye is the sight height. */
+const FIRE_BLOCK = 4, FIRE_SLACK = 3, FIRE_MARGIN = 0.6;
 /** A sight line is screened when it passes a cell next to a stationary friendly, ignoring this much at each end. */
 const SCREEN_CLEAR = 0.9;
-/** Per-tick work cap for the seeding phase (shared by both fields): sight rays, and candidate cells visited. */
-const FIRE_RAYS_PER_TICK = 160, FIRE_CELLS_PER_TICK = 1200;
+/** What one kind of mover can use: the graph predicates and the field's cost and seeding constants. */
+export interface NavigationProfile {
+  /** Whether a mover can stand on the cell centre (x, z). */
+  stand(terrain: Terrain, x: number, z: number): boolean;
+  /** Whether a mover can cross the edge between two usable cell centres. */
+  traverse(terrain: Terrain, x: number, z: number, tx: number, tz: number): boolean;
+  /** Whether a mover at an arbitrary point (x, z) can reach the usable cell centre (tx, tz). Used by `nodeAt`. */
+  snap(terrain: Terrain, x: number, z: number, tx: number, tz: number): boolean;
+  /** Mover radius, for callers and diagnostics. */
+  radius: number;
+  /** Field cost multiplier rises from 1 at `openClearance` or more to 1 + `narrowPenalty` in a one-cell slot. */
+  openClearance: number;
+  narrowPenalty: number;
+  /** Extra field cost per unit of height change along an edge. */
+  elevationCost: number;
+  /** Sight height above the ground at firing positions and their targets. */
+  fireEye: number;
+  /** Per-tick work cap for the seeding phase (shared by both fields): sight rays, and candidate cells visited. */
+  fireRaysPerTick: number;
+  fireCellsPerTick: number;
+}
+
+/** Soldiers: the predicates and constants infantry navigation has always used. */
+export function infantryProfile(radius: number): NavigationProfile {
+  return {
+    stand: (terrain, x, z) => terrain.canStand(x, z, radius + 0.035),
+    traverse: (terrain, x, z, tx, tz) => terrain.canTraverse(x, z, tx, tz, radius + 0.02),
+    snap: (terrain, x, z, tx, tz) => terrain.canTraverse(x, z, tx, tz, radius),
+    radius, openClearance: 2.6, narrowPenalty: 4, elevationCost: 0.25,
+    fireEye: 0.7, fireRaysPerTick: 160, fireCellsPerTick: 1200,
+  };
+}
+
 /** Chamfer distance from each cell to the nearest blocked cell or map edge. */
 function clearanceMap(walkable: Uint8Array, columns: number, rows: number, dx: number, dz: number) {
   const size = columns * rows, d = new Float32Array(size), diagonal = Math.hypot(dx, dz);
@@ -93,8 +122,8 @@ class FlowField {
   }
 }
 
-/** Static clearance graph + two shared, incrementally rebuilt multi-source fields.
- * Soldiers are handled by local collision; they never invalidate this graph. */
+/** Static clearance graph + two shared, incrementally rebuilt multi-source fields, for one mover profile.
+ * Moving bodies are handled by local collision; they never invalidate this graph. */
 export class Navigation {
   readonly walkable: Uint8Array;
   readonly edges: Uint8Array;
@@ -108,6 +137,7 @@ export class Navigation {
   readonly crowding: Float32Array;
   readonly clearance: Float32Array;
   readonly terrain: Terrain;
+  readonly profile: NavigationProfile;
   readonly radius: number;
   regionCount = 0;
   buildMs = 0;
@@ -115,21 +145,24 @@ export class Navigation {
   totalExpansions = 0;
   directionX = 0;
   directionZ = 0;
-  // A* scratch is reserved once for exceptional routes and deterministic fixtures.
-  private readonly pathScore: Float32Array;
-  private readonly pathPriority: Float32Array;
-  private readonly pathParent: Int32Array;
-  private readonly pathHeap: Heap;
-  private readonly occupancy: Float32Array;
-  private readonly blur: Float32Array;
+  // A* scratch is allocated on the first findPath, for exceptional routes and deterministic fixtures.
+  private pathScore: Float32Array | null = null;
+  private pathPriority: Float32Array | null = null;
+  private pathParent: Int32Array | null = null;
+  private pathHeap: Heap | null = null;
+  // Congestion scratch is allocated on the first field with occupants.
+  private occupancy: Float32Array | null = null;
+  private blur: Float32Array | null = null;
   // Firing-position gather scratch, stamped per query so nothing is cleared or allocated per rebuild.
   private readonly fireBlocks: Uint32Array;
   private readonly fireCells: Uint32Array;
   private fireQuery = 0;
   /** Running total of sight rays cast while seeding firing positions (diagnostics/benchmarks). */
   fireRays = 0;
-  constructor(terrain: Terrain, radius: number) {
-    this.terrain = terrain; this.radius = radius;
+  /** A number is an infantry radius. */
+  constructor(terrain: Terrain, profile: NavigationProfile | number) {
+    if (typeof profile === 'number') profile = infantryProfile(profile);
+    this.terrain = terrain; this.profile = profile; this.radius = profile.radius;
     const start = performance.now(), size = terrain.columns * terrain.rows;
     this.walkable = new Uint8Array(size); this.edges = new Uint8Array(size); this.regions = new Int32Array(size).fill(-1); this.queue = new Int32Array(size);
     this.offsets = DX.map((x, i) => x + DZ[i] * terrain.columns);
@@ -137,10 +170,8 @@ export class Navigation {
     this.costs = DX.map((x, i) => Math.hypot(x * terrain.dx, DZ[i] * terrain.dz));
     const blocks = Math.ceil(terrain.columns / FIRE_BLOCK) * Math.ceil(terrain.rows / FIRE_BLOCK);
     this.fields = [new FlowField(size, blocks), new FlowField(size, blocks)];
-    this.pathScore = new Float32Array(size); this.pathPriority = new Float32Array(size); this.pathParent = new Int32Array(size); this.pathHeap = new Heap(this.pathPriority);
-    this.occupancy = new Float32Array(size); this.blur = new Float32Array(size);
     this.fireBlocks = new Uint32Array(blocks); this.fireCells = new Uint32Array(size);
-    for (let node = 0; node < size; node++) { this.walkable[node] = +terrain.canStand(this.x(node), this.z(node), radius + 0.035); this.elevation[node] = terrain.heightAt(this.x(node), this.z(node)); }
+    for (let node = 0; node < size; node++) { this.walkable[node] = +profile.stand(terrain, this.x(node), this.z(node)); this.elevation[node] = terrain.heightAt(this.x(node), this.z(node)); }
     for (let node = 0; node < size; node++) if (this.walkable[node]) {
       const c = node % terrain.columns, r = Math.floor(node / terrain.columns), x = this.x(node), z = this.z(node);
       for (const dir of [0, 1, 4, 5]) {
@@ -148,7 +179,7 @@ export class Navigation {
         const next = node + this.offsets[dir];
         if (!this.walkable[next]) continue;
         if (dir >= 4 && (!this.walkable[node + DX[dir]] || !this.walkable[node + DZ[dir] * terrain.columns])) continue;
-        if (terrain.canTraverse(x, z, this.x(next), this.z(next), radius + 0.02)) {
+        if (profile.traverse(terrain, x, z, this.x(next), this.z(next))) {
           this.edges[node] |= 1 << dir;
           this.edges[next] |= 1 << (dir < 4 ? (dir + 2) % 4 : 4 + (dir - 4 + 2) % 4);
         }
@@ -160,18 +191,19 @@ export class Navigation {
       this.regionCount++;
     }
     this.clearance = clearanceMap(this.walkable, terrain.columns, terrain.rows, terrain.dx, terrain.dz);
-    this.crowding = this.clearance.map(d => { const t = Math.max(0, 1 - d / OPEN_CLEARANCE); return 1 + NARROW_PENALTY * t * t; });
+    const { openClearance, narrowPenalty } = profile;
+    this.crowding = this.clearance.map(d => { const t = Math.max(0, 1 - d / openClearance); return 1 + narrowPenalty * t * t; });
     this.buildMs = performance.now() - start;
   }
   x(node: number) { return -this.terrain.halfWidth + (node % this.terrain.columns + 0.5) * this.terrain.dx; }
   z(node: number) { return -this.terrain.halfDepth + (Math.floor(node / this.terrain.columns) + 0.5) * this.terrain.dz; }
   nodeAt(x: number, z: number) {
     const node = this.terrain.cell(x, z);
-    if (this.walkable[node] && this.terrain.canTraverse(x, z, this.x(node), this.z(node), this.radius)) return node;
+    if (this.walkable[node] && this.profile.snap(this.terrain, x, z, this.x(node), this.z(node))) return node;
     const c = node % this.terrain.columns, r = Math.floor(node / this.terrain.columns);
     for (let ring = 1; ring <= 3; ring++) for (let rz = Math.max(0, r - ring); rz <= Math.min(this.terrain.rows - 1, r + ring); rz++) for (let cx = Math.max(0, c - ring); cx <= Math.min(this.terrain.columns - 1, c + ring); cx++) {
       const n = rz * this.terrain.columns + cx;
-      if (this.walkable[n] && this.terrain.canTraverse(x, z, this.x(n), this.z(n), this.radius)) return n;
+      if (this.walkable[n] && this.profile.snap(this.terrain, x, z, this.x(n), this.z(n))) return n;
     }
     return -1;
   }
@@ -218,7 +250,7 @@ export class Navigation {
    * for less than the seed would cost skip their rays unless they were seeded last build (keeps seeds stable).
    */
   private seedFiring(f: FlowField, rays: number, visits: number) {
-    const t = this.terrain, reps = f.reps, previous = f.build - 1;
+    const t = this.terrain, reps = f.reps, previous = f.build - 1, eye = this.profile.fireEye;
     for (; f.cursor < f.candidateCount && rays > 0 && visits > 0; f.cursor++, visits--) {
       const n = f.candidates[f.cursor], x = this.x(n), z = this.z(n), y = this.elevation[n];
       let a = -1, b = -1, da = Infinity, db = Infinity;
@@ -237,7 +269,7 @@ export class Navigation {
         // Standing behind our own firing line is no vantage point (shots there are blocked by friendlies).
         if (this.screened(f.screen, x, z, this.x(m), this.z(m))) continue;
         rays--; this.fireRays++;
-        if (t.visible(x, y + FIRE_EYE, z, this.x(m), this.elevation[m] + FIRE_EYE, this.z(m))) cost = Math.sqrt(d) + FIRE_SLACK;
+        if (t.visible(x, y + eye, z, this.x(m), this.elevation[m] + eye, this.z(m))) cost = Math.sqrt(d) + FIRE_SLACK;
       }
       if (cost < 0 || cost >= f.pending[n]) continue;
       f.pending[n] = cost; f.heap.push(n); f.firing[n] = f.build; f.firingSeeds++;
@@ -258,7 +290,8 @@ export class Navigation {
     const out = f.congestion;
     out.fill(0); f.screen.fill(0);
     if (!occupants || count <= 0) return;
-    const columns = this.terrain.columns, rows = this.terrain.rows, occ = this.occupancy, blur = this.blur;
+    const columns = this.terrain.columns, rows = this.terrain.rows;
+    const occ = this.occupancy ??= new Float32Array(out.length), blur = this.blur ??= new Float32Array(out.length);
     occ.fill(0);
     for (let i = 0; i < count; i++) { const node = occupants[i]; if (node >= 0) occ[node]++; }
     // Separable 3x3 box average: per-cell counts are too noisy to route around.
@@ -275,8 +308,9 @@ export class Navigation {
   }
   advance(budget = 1024) {
     this.expansions = 0;
+    const elevationCost = this.profile.elevationCost;
     // Seeding comes first and is capped per tick; a field's sweep starts once all its seeds are in.
-    let rays = FIRE_RAYS_PER_TICK, visits = FIRE_CELLS_PER_TICK;
+    let rays = this.profile.fireRaysPerTick, visits = this.profile.fireCellsPerTick;
     for (const f of this.fields) if (f.seeding && rays > 0 && visits > 0) ({ rays, visits } = this.seedFiring(f, rays, visits));
     const sweeping = (f: FlowField) => f.building && !f.seeding;
     for (let turn = 0; turn < budget; turn++) {
@@ -284,7 +318,7 @@ export class Navigation {
       if (!sweeping(f)) break;
       const node = f.heap.pop(); this.expansions++;
       for (let dir = 0; dir < 8; dir++) if (this.edges[node] & 1 << dir) {
-        const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * (this.crowding[next] + f.congestion[next]) + Math.abs(this.elevation[node] - this.elevation[next]) * 0.25;
+        const next = node + this.offsets[dir], cost = f.pending[node] + this.costs[dir] * (this.crowding[next] + f.congestion[next]) + Math.abs(this.elevation[node] - this.elevation[next]) * elevationCost;
         if (cost < f.pending[next] - 1e-5) { f.pending[next] = cost; f.heap.push(next); }
       }
       if (!f.heap.length) { f.distance.set(f.pending); f.ready = true; f.building = false; }
@@ -314,14 +348,17 @@ export class Navigation {
   findPath(x: number, z: number, tx: number, tz: number, budget = 12000): number[] | null {
     const start = this.nodeAt(x, z), goal = this.nodeAt(tx, tz);
     if (start < 0 || goal < 0 || this.regions[start] !== this.regions[goal]) return null;
-    this.pathScore.fill(Infinity); this.pathParent.fill(-1); this.pathPriority.fill(Infinity); this.pathHeap.clear();
-    this.pathScore[start] = this.pathPriority[start] = 0; this.pathHeap.push(start);
-    while (this.pathHeap.length && budget-- > 0) {
-      const node = this.pathHeap.pop();
-      if (node === goal) { const path: number[] = []; for (let n = goal; n >= 0; n = this.pathParent[n]) path.push(n); return path.reverse(); }
+    const size = this.walkable.length;
+    const score = this.pathScore ??= new Float32Array(size), parent = this.pathParent ??= new Int32Array(size);
+    const priority = this.pathPriority ??= new Float32Array(size), heap = this.pathHeap ??= new Heap(priority);
+    score.fill(Infinity); parent.fill(-1); priority.fill(Infinity); heap.clear();
+    score[start] = priority[start] = 0; heap.push(start);
+    while (heap.length && budget-- > 0) {
+      const node = heap.pop();
+      if (node === goal) { const path: number[] = []; for (let n = goal; n >= 0; n = parent[n]) path.push(n); return path.reverse(); }
       for (let dir = 0; dir < 8; dir++) if (this.edges[node] & 1 << dir) {
-        const next = node + this.offsets[dir], cost = this.pathScore[node] + this.costs[dir];
-        if (cost < this.pathScore[next] - 1e-5) { this.pathParent[next] = node; this.pathScore[next] = cost; this.pathPriority[next] = cost + Math.hypot(this.x(next) - tx, this.z(next) - tz); this.pathHeap.push(next); }
+        const next = node + this.offsets[dir], cost = score[node] + this.costs[dir];
+        if (cost < score[next] - 1e-5) { parent[next] = node; score[next] = cost; priority[next] = cost + Math.hypot(this.x(next) - tx, this.z(next) - tz); heap.push(next); }
       }
     }
     return null;
