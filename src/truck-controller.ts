@@ -4,7 +4,36 @@ import { DRIVER, Maneuver, TRUCK, angleDelta, type TruckBlocker } from './vehicl
 import type { VehicleFleet } from './vehicles.ts';
 
 const SKIN = 0.002;
-type FootTraffic = 'all' | 'allies';
+/**
+ * Overlap a disk already touching another truck may slide through, so trucks pressed side by side, or nosed into the
+ * bumps between footprint disks (0.02 deep), are not glued together. Any overlap up to TOUCH_SOFT is fine;
+ * past it a move may deepen by TOUCH_BUMP (to cross a bump) up to TOUCH_HARD. Sweeps from outside still stop
+ * at contact, and moving straight apart is always allowed.
+ */
+const TOUCH_SOFT = 0.03, TOUCH_BUMP = 0.025, TOUCH_HARD = 0.06;
+const slides = (start: number, deepest: number) => deepest <= TOUCH_SOFT || deepest <= TOUCH_HARD && deepest <= start + TOUCH_BUMP;
+/**
+ * Touching trucks are compared as capsules: the segment through the footprint disks, inflated by the radius. That
+ * overlap is smooth, so trucks pressed side by side can slide apart even where single disk pairs pass a bump.
+ * A move between touching trucks is fine while the capsule overlap never deepens past the start (or TOUCH_SOFT);
+ * past SPINE_DEEP the disk rule alone decides.
+ */
+const SPINE = TRUCK.disks[TRUCK.disks.length - 1], SPINE_DEEP = 0.15, SPINE_SAMPLES = 4;
+function pointToSpine(px: number, pz: number, x: number, z: number, sin: number, cos: number) {
+  const t = Math.max(-SPINE, Math.min(SPINE, (px - x) * sin + (pz - z) * cos));
+  return Math.hypot(px - x - sin * t, pz - z - cos * t);
+}
+/** Distance between two truck spines; 0 when they cross. */
+function spineGap(ax: number, az: number, as: number, ac: number, bx: number, bz: number, bs: number, bc: number) {
+  const a0x = ax - as * SPINE, a0z = az - ac * SPINE, a1x = ax + as * SPINE, a1z = az + ac * SPINE;
+  const b0x = bx - bs * SPINE, b0z = bz - bc * SPINE, b1x = bx + bs * SPINE, b1z = bz + bc * SPINE;
+  const side = (px: number, pz: number, qx: number, qz: number, rx: number, rz: number) => (qx - px) * (rz - pz) - (qz - pz) * (rx - px);
+  if (side(a0x, a0z, a1x, a1z, b0x, b0z) * side(a0x, a0z, a1x, a1z, b1x, b1z) < 0
+    && side(b0x, b0z, b1x, b1z, a0x, a0z) * side(b0x, b0z, b1x, b1z, a1x, a1z) < 0) return 0;
+  return Math.min(pointToSpine(a0x, a0z, bx, bz, bs, bc), pointToSpine(a1x, a1z, bx, bz, bs, bc),
+    pointToSpine(b0x, b0z, ax, az, as, ac), pointToSpine(b1x, b1z, ax, az, as, ac));
+}
+type FootTraffic = 'all' | 'allies' | 'none';
 
 /** Ground physics for the truck. Crew, weapons, and damage belong to the fleet. */
 export class TruckController {
@@ -15,6 +44,7 @@ export class TruckController {
   private readonly motion = { yaw: 0, vx: 0, vz: 0 };
   private readonly contactLatch = new Map<number, { truck: number; soldier: number }>();
   private contactFoot = -1;
+  private contactTruck = -1;
   private contactNX = 0;
   private contactNZ = 0;
   private contactSpeed = 0;
@@ -40,7 +70,7 @@ export class TruckController {
     const sin = Math.sin(yaw), cos = Math.cos(yaw), sn = Math.sin(tyaw), cs = Math.cos(tyaw);
     const radius = TRUCK.radius + clearance + TRUCK.reach * (1 - Math.cos(angleDelta(tyaw, yaw) * 0.5));
     if (blocker) blocker.padding = radius - TRUCK.radius;
-    this.contactFoot = -1;
+    this.contactFoot = this.contactTruck = -1;
     let fraction = 1;
     for (let k = 0; k < TRUCK.disks.length; k++) {
       const d = TRUCK.disks[k];
@@ -64,7 +94,7 @@ export class TruckController {
     const near = grid.row(Math.min(z, tz) - reach), far = grid.row(Math.max(z, tz) + reach);
     for (let row = near; row <= far; row++) for (let col = left; col <= right; col++) {
       const cell = row * grid.columns + col;
-      for (let i = grid.heads[cell]; i >= 0; i = grid.next[i]) {
+      for (let i = feet === 'none' ? -1 : grid.heads[cell]; i >= 0; i = grid.next[i]) {
         if (feet === 'allies' && sim.team[i] !== f.team[v]) continue;
         if (!f.onFoot(i) || ignore?.includes(i) || sim.y[i] > y + TRUCK.hull.top + 0.02 || sim.y[i] + CONFIG.soldier.height < y) continue;
         const dist = this.sweepDisks(sim.x[i], sim.z[i], radius + sim.radius[i] + SKIN, fraction);
@@ -73,26 +103,40 @@ export class TruckController {
           blocker.kind = 'infantry'; blocker.id = sim.id[i]; blocker.x = sim.x[i]; blocker.z = sim.z[i]; blocker.atStart = dist === 0;
         }
         if (!truncate) return dist;
-        fraction = dist; this.contactFoot = i;
+        fraction = dist; this.contactFoot = i; this.contactTruck = -1;
       }
       for (let other = trucks.heads[cell]; other >= 0; other = trucks.next[other]) {
         if (other === v || Math.abs(f.y[other] - y) > TRUCK.hull.top + 0.24) continue;
+        if (this.slidesPast(other, x, z, yaw, tx, tz, tyaw, radius + TRUCK.radius + SKIN, fraction)) continue;
         for (const offset of TRUCK.disks) {
           const dist = this.sweepDisks(f.x[other] + f.sin[other] * offset, f.z[other] + f.cos[other] * offset,
-            radius + TRUCK.radius + SKIN, fraction);
+            radius + TRUCK.radius + SKIN, fraction, true);
           if (dist >= fraction) continue;
           if (blocker) {
             blocker.kind = 'truck'; blocker.id = f.id[other]; blocker.x = f.x[other]; blocker.z = f.z[other]; blocker.atStart = dist === 0;
           }
           if (!truncate) return dist;
-          fraction = dist; this.contactFoot = -1;
+          fraction = dist; this.contactFoot = -1; this.contactTruck = other;
         }
       }
     }
     return fraction;
   }
 
-  private sweepDisks(x: number, z: number, radius: number, fraction: number) {
+  /** True when the truck starts touching `other` and the move never deepens their capsule overlap (see SPINE). */
+  private slidesPast(other: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number, contact: number, fraction: number) {
+    const f = this.fleet, ox = f.x[other], oz = f.z[other], os = f.sin[other], oc = f.cos[other];
+    const start = contact - spineGap(x, z, Math.sin(yaw), Math.cos(yaw), ox, oz, os, oc);
+    if (start <= 0 || start > SPINE_DEEP) return false;
+    const limit = Math.max(TOUCH_SOFT, start) + 1e-9, turn = angleDelta(tyaw, yaw);
+    for (let k = 1; k <= SPINE_SAMPLES; k++) {
+      const s = fraction * k / SPINE_SAMPLES, a = yaw + turn * s;
+      if (contact - spineGap(x + (tx - x) * s, z + (tz - z) * s, Math.sin(a), Math.cos(a), ox, oz, os, oc) > limit) return false;
+    }
+    return true;
+  }
+
+  private sweepDisks(x: number, z: number, radius: number, fraction: number, truck = false) {
     for (let k = 0; k < TRUCK.disks.length; k++) {
       const ax = this.ax[k], az = this.az[k], dx = this.bx[k] - ax, dz = this.bz[k] - az;
       const ox = x - ax, oz = z - az;
@@ -103,6 +147,9 @@ export class TruckController {
       if (square <= radius * radius) {
         // A touching disk can move away or slide tangent, including when backing out.
         if (len > 1e-8 && inward <= 1e-10) continue;
+        // Sliding past it is fine too while the overlap at the closest approach stays shallow.
+        const s = Math.min(1, inward / (len * len));
+        if (truck && len > 1e-8 && slides(radius - Math.sqrt(square), radius - Math.hypot(ox - dx * s, oz - dz * s))) continue;
         t = 0;
       } else {
         if (len < 1e-8 || inward <= 0) continue;
@@ -122,6 +169,29 @@ export class TruckController {
     margin: number, feet: FootTraffic, ignore?: readonly number[], blocker?: TruckBlocker) {
     // Placement starts with a static footprint test; the sweep then checks the exit.
     return this.sweep(v, x, z, yaw, tx, tz, tyaw, margin, feet, ignore, false, blocker) === 1;
+  }
+
+  /**
+   * Other trucks only, for replaying poses the truck already drove through (statically clear) in short steps.
+   * The end pose may overlap another truck as a touching sweep may slide (see TOUCH_SOFT).
+   */
+  trucksClear(v: number, x: number, z: number, yaw: number, tx: number, tz: number, tyaw: number) {
+    const f = this.fleet, trucks = f.grid, sn = Math.sin(tyaw), cs = Math.cos(tyaw), s0 = Math.sin(yaw), c0 = Math.cos(yaw);
+    const reach = 2 * (TRUCK.reach + TRUCK.radius) + SKIN, contact = 2 * TRUCK.radius + SKIN;
+    for (let row = trucks.row(tz - reach); row <= trucks.row(tz + reach); row++) for (let col = trucks.column(tx - reach); col <= trucks.column(tx + reach); col++) {
+      for (let other = trucks.heads[row * trucks.columns + col]; other >= 0; other = trucks.next[other]) {
+        if (other === v || Math.abs(f.y[other] - f.y[v]) > TRUCK.hull.top + 0.24) continue;
+        if (this.slidesPast(other, x, z, yaw, tx, tz, tyaw, contact, 1)) continue;
+        let end = Infinity, start = Infinity;
+        for (const a of TRUCK.disks) for (const b of TRUCK.disks) {
+          const ox = f.x[other] + f.sin[other] * b, oz = f.z[other] + f.cos[other] * b;
+          end = Math.min(end, Math.hypot(tx + sn * a - ox, tz + cs * a - oz) - contact);
+          start = Math.min(start, Math.hypot(x + s0 * a - ox, z + c0 * a - oz) - contact);
+        }
+        if (end < 0 && end < start && !slides(-start, -end)) return false;
+      }
+    }
+    return true;
   }
 
   blocksFoot(x: number, y: number, z: number, radius: number) {
@@ -228,6 +298,7 @@ export class TruckController {
       if (f.exitLeft[v] === 0) f.due[v] = Math.max(sim.time, f.due[v]);
     }
     f.vx[v] = sx; f.vz[v] = sz;
+    f.recovery.blockerTruck[v] = this.contactTruck;
     if (fraction === 1) { f.stalledTicks[v] = 0; return; }
     f.stalledTicks[v] = travel > 0.35 ? 0 : Math.min(255, f.stalledTicks[v] + 1);
     f.metrics.contacts++;

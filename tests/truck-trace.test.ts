@@ -100,15 +100,27 @@ test('a truck can pull forward if its rear is against the map edge', () => {
 });
 
 test('a truck can steer in reverse when the same rock blocks both straight recoveries', () => {
+  // A canyon rock met with the front corner while turning (a pose taken from a full canyon battle).
   const seed = 74319;
   const tuning = { ...DEFAULT_TUNING, count: 20, columns: 5, seed };
   const { terrain, navigation } = prepareTerrain(tuning, seed, 'canyon');
-  const sim = new BattleSimulation(tuning.count, seed, CONFIG.capacity, tuning, terrain, navigation);
-  const trace = sim.vehicles.startTrace();
-  sim.queue({ type: 'deployTrucks', teams: 3, x: 0, z: 0, radius: Math.hypot(tuning.halfWidth, tuning.halfDepth) + 1 });
-  step(sim, 375);
+  const sim = new BattleSimulation(0, seed, 64, tuning, terrain, navigation);
+  sim.weaponsEnabled = false;
+  assert.ok(sim.spawn(0, -6.5, -13.5));
+  assert.ok(sim.spawn(1, 6, 12));
+  sim.queue({ type: 'deployTrucks', teams: 1, x: -6.5, z: -13.5, radius: 1 });
+  sim.flushCommands();
+  const fleet = sim.vehicles, v = fleet.active[0];
+  assert.equal(fleet.count, 1);
+  fleet.exitLeft[v] = 0;
+  fleet.setPose(v, -6.098, -11.514, 0.637);
+  fleet.previousX[v] = fleet.x[v]; fleet.previousZ[v] = fleet.z[v];
+  fleet.vx[v] = 1.93; fleet.vz[v] = 3.8; fleet.desiredYaw[v] = 0.66; fleet.desiredSpeed[v] = 7.88;
+  fleet.mode[v] = Maneuver.Approach; fleet.due[v] = fleet.committedUntil[v] = Infinity;
+  const trace = fleet.startTrace();
+  step(sim, 60);
 
-  const truck = trace.report().trucks.find(entry => entry.id === 7);
+  const [truck] = trace.report().trucks;
   assert.ok(truck?.snapshot);
   const contact = truck.events.find(event => event.kind === 'contact' && event.blocker.kind === 'rock' && event.blocker.id === 12);
   const decision = truck.events.find(event => event.kind === 'decision' && event.recovery.some(check => check.steering && !check.blockedBy));
@@ -120,4 +132,29 @@ test('a truck can steer in reverse when the same rock blocks both straight recov
   ]);
   assert.ok(Math.hypot(truck.snapshot.x - contact.x, truck.snapshot.z - contact.z) > 0.85);
   assert.equal(truck.events.some(event => event.kind === 'contact' && event.tick > decision.tick), false);
+});
+
+test('the trace totals routing work: plans by route state, truck graph builds and field sweeps', () => {
+  const terrain = new Terrain(20, 20, 0, [{ x: 0, z: 6, radius: 1.5, base: 0, height: 3, angle: 0 }]);
+  terrain.rebuild();
+  const { sim, fleet, truck } = fixture(terrain);
+  // A tough enemy keeps the battle running after the truck reaches it.
+  for (let i = 0; i < sim.used; i++) if (sim.team[i] === 1) sim.hp[i] = 1e6;
+  const trace = fleet.startTrace();
+  step(sim, 240);
+  const { routing } = trace.report(), m = fleet.metrics;
+  assert.equal(routing.graphBuilds, 1);
+  assert.ok(routing.graphBuildMs > 0);
+  assert.ok(routing.queries > 0);
+  // Every plan is counted exactly once: aimed along the field, straight, or a fallback.
+  const fallbacks = Object.values(routing.fallbacks).reduce((a, b) => a + b, 0);
+  assert.equal(routing.route + routing.straight + fallbacks, routing.queries);
+  assert.ok(routing.route + routing.straight > 0);
+  assert.ok(routing.fieldFullSweeps + routing.fieldEarlyStops > 0);
+  assert.ok(routing.peakFieldExpansions <= 512 && routing.fieldExpansions >= routing.peakFieldExpansions);
+  sim.tuning.truckPathing = 0;
+  const before = m.fallbackDisabled;
+  fleet.due[truck] = fleet.committedUntil[truck] = 0;
+  step(sim, 2);
+  assert.ok(m.fallbackDisabled > before);
 });

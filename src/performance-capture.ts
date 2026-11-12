@@ -90,7 +90,7 @@ export class PerformanceCapture {
     const paintSorted = this.paintIntervals.sort((a, b) => a - b);
     const workDuringCapture = { ...work };
     for (const key of Object.keys(work) as (keyof Work)[]) {
-      if (key !== 'peakTrucks' && key !== 'maxQueueDelay') workDuringCapture[key] -= this.workStart![key];
+      if (key !== 'peakTrucks' && key !== 'maxQueueDelay' && key !== 'peakFieldExpansions') workDuringCapture[key] -= this.workStart![key];
     }
     let long = 0; for (const frame of sorted) if (frame > 33.4) long++;
     this.report = {

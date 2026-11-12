@@ -6,6 +6,7 @@ import { Terrain } from '../src/terrain.ts';
 import { DEFAULT_TUNING, effectiveTurretRange, loadTuning, type TuningValues } from '../src/tuning.ts';
 import { writeSetting } from '../src/settings-store.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, SEAT_COUNT, TRUCK } from '../src/vehicle-types.ts';
+import { ROUTE_STATES } from '../src/truck-tactics.ts';
 
 function battle(changes: Partial<TuningValues> = {}, terrain?: Terrain) {
   const sim = new BattleSimulation(0, 27, 128, { ...DEFAULT_TUNING, speed: 0.2, ...changes }, terrain);
@@ -322,4 +323,208 @@ test('an expired recruitment reservation frees both the rider and the seat', () 
   assert.equal(f.reservation(v, DRIVER), recruit); assert.equal(f.reservedVehicle[recruit], v);
   tick(sim, 33);
   assert.equal(f.reservation(v, DRIVER), -1); assert.equal(f.reservedVehicle[recruit], -1); assert.equal(f.seat(v, DRIVER), -1);
+});
+
+const wallRock = (height = 3) => ([x, z]: number[]) => ({ x, z, radius: 1.1, base: 0, height, angle: 0 });
+function rockLine(x0: number, z0: number, x1: number, z1: number) {
+  const n = Math.ceil(Math.hypot(x1 - x0, z1 - z0) / 1.3);
+  return Array.from({ length: n + 1 }, (_, k) => [x0 + (x1 - x0) * k / n, z0 + (z1 - z0) * k / n]);
+}
+function rockRing(x: number, z: number, radius: number, count: number) {
+  return Array.from({ length: count }, (_, k) => [x + Math.sin(k * 2 * Math.PI / count) * radius, z + Math.cos(k * 2 * Math.PI / count) * radius]);
+}
+/** One crewed truck at `start` against tough, unarmed enemies: its closest approach, end, trail and route states seen. */
+function routeRun(rocks: ReturnType<ReturnType<typeof wallRock>>[], changes: Partial<TuningValues>, start: number[], enemies: number[][], ticks: number, traced = false) {
+  const terrain = new Terrain(28, 34, 0, rocks);
+  terrain.rebuild();
+  const sim = battle({ truckRamAggression: 0, ...changes }, terrain), f = sim.vehicles, v = crew(sim, 0, start[0], start[1]);
+  const foes = enemies.map(([x, z]) => { const i = spawn(sim, 1, x, z); sim.hp[i] = 1e6; return i; });
+  const trace = traced ? f.startTrace() : null;
+  const states = new Set<string>(), trail: number[] = [];
+  let closest = Infinity;
+  for (let n = 0; n < ticks; n++) {
+    tick(sim);
+    closest = Math.min(closest, Math.hypot(f.x[v] - sim.x[foes[0]], f.z[v] - sim.z[foes[0]]));
+    states.add(ROUTE_STATES[f.tactics.routeState[v]]); trail.push(f.x[v], f.z[v], f.yaw[v]);
+  }
+  return { sim, v, closest, states, trail, trace, distance: Math.hypot(f.x[v] - sim.x[foes[0]], f.z[v] - sim.z[foes[0]]) };
+}
+
+test('drivers follow the truck route out of a U-shaped wall that stops a straight-line driver', () => {
+  const cup = [...rockLine(-9, 0, 9, 0), ...rockLine(-9, -1.3, -9, -14), ...rockLine(9, -1.3, 9, -14)].map(wallRock());
+  const routed = routeRun(cup, {}, [0, -6], [[0, 18]], 1200, true);
+  assert.ok(routed.closest < 6, `reached the enemy behind the cup (${routed.closest.toFixed(1)})`);
+  assert.ok(routed.states.has('route') && routed.states.has('straight'), 'routed around the wall, then drove straight');
+  const decisions = routed.trace!.report().trucks[0].events.filter(e => e.kind === 'decision');
+  const step = decisions.find(e => e.kind === 'decision' && e.route?.state === 'route');
+  assert.ok(step && step.kind === 'decision' && step.route!.target && step.route!.fieldDistance! > 0, 'the trace records the route');
+  const straight = routeRun(cup, { truckPathing: 0 }, [0, -6], [[0, 18]], 1200);
+  assert.ok(straight.closest > 15, 'with pathfinding off the driver stays inside the cup');
+  assert.deepEqual([...straight.states].filter(s => s !== 'none'), ['disabled']);
+});
+
+test('drivers find a canyon entrance far outside the old search horizon', () => {
+  const ridge = [...rockLine(-27, 0, 16, 0), ...rockLine(23, 0, 27, 0)].map(wallRock());
+  assert.ok(routeRun(ridge, {}, [0, -6], [[0, 18]], 1500).closest < 6, 'drove through a gap 17 units to the side');
+  assert.ok(routeRun(ridge, { truckPathing: 0 }, [0, -6], [[0, 18]], 1500).closest > 15);
+});
+
+test('open-field routes are unchanged by the truck route', () => {
+  const far = [[-24, 30]].map(wallRock()), foes = [[3, 14], [-2, 16], [8, 20]];
+  const on = routeRun(far, {}, [0, -6], foes, 900), off = routeRun(far, { truckPathing: 0 }, [0, -6], foes, 900);
+  assert.deepEqual(on.trail, off.trail);
+  assert.ok(!on.states.has('route') && on.states.has('straight'));
+});
+
+test('an enemy on unreachable ground draws the truck to a firing position at its foot', () => {
+  const rim = rockRing(0, 18, 6, 30).map(wallRock(0.5));
+  const run = routeRun(rim, {}, [0, -6], [[0, 18]], 1200), f = run.sim.vehicles, nav = f.truckNavigation!;
+  assert.ok(run.distance > 7.1 && run.distance < effectiveTurretRange(run.sim.tuning), `holds in turret range outside the rim (${run.distance.toFixed(1)})`);
+  assert.ok(Number.isFinite(nav.fields[0].distance[nav.nodeAt(f.x[run.v], f.z[run.v])]), 'the firing cell is on the field');
+});
+
+test('each route fallback is reported: disabled, no graph, not ready and unknown cell', () => {
+  const flat = battle({ truckRamAggression: 0 }), v = crew(flat, 0, 0, -6);
+  spawn(flat, 1, 0, 18); tick(flat, 120);
+  assert.equal(ROUTE_STATES[flat.vehicles.tactics.routeState[v]], 'no-graph');
+  const box = rockRing(0, -20, 3.2, 16).map(wallRock());
+  const boxed = routeRun(box, {}, [0, -20], [[0, 25]], 300);
+  assert.ok(boxed.states.has('not-ready'), 'plans while the graph builds fall back');
+  assert.equal(ROUTE_STATES[boxed.sim.vehicles.tactics.routeState[boxed.v]], 'unknown-cell');
+  assert.ok(routeRun(box, { truckPathing: 0 }, [0, -20], [[0, 25]], 120).states.has('disabled'));
+});
+
+/** A finished truck graph from the start, so placement and routing see the terrain immediately. */
+function recoveryWorld(rocks: number[][], changes: Partial<TuningValues> = {}) {
+  const terrain = new Terrain(28, 34, 0, rocks.map(wallRock()));
+  terrain.rebuild();
+  const sim = new BattleSimulation(0, 27, 256, { ...DEFAULT_TUNING, speed: 0.2, truckRamAggression: 0, ...changes }, terrain);
+  sim.weaponsEnabled = false;
+  sim.vehicles.truckGraph!.finish(sim.tuning.truckSlope);
+  return sim;
+}
+function toughEnemy(sim: BattleSimulation, x: number, z: number) { const i = spawn(sim, 1, x, z); sim.hp[i] = 1e6; return i; }
+/** Deepest overlap of any living soldier on foot with the truck's footprint disks. */
+function soldierOverlap(sim: BattleSimulation, v: number) {
+  const f = sim.vehicles; let worst = 0;
+  for (let i = 0; i < sim.used; i++) {
+    if (sim.hp[i] <= 0 || !f.onFoot(i)) continue;
+    for (const d of TRUCK.disks) worst = Math.max(worst, TRUCK.radius + sim.radius[i] - Math.hypot(sim.x[i] - f.x[v] - f.sin[v] * d, sim.z[i] - f.z[v] - f.cos[v] * d));
+  }
+  return worst;
+}
+/** Runs a crowded truck: when it first moves, its longest stall, the deepest soldier overlap. */
+function crowdRun(sim: BattleSimulation, v: number, ticks: number) {
+  const f = sim.vehicles, x = f.x[v], z = f.z[v];
+  let firstMove = Infinity, maxStall = 0, overlap = 0;
+  for (let n = 1; n <= ticks; n++) {
+    tick(sim);
+    if (firstMove === Infinity && Math.hypot(f.x[v] - x, f.z[v] - z) > 0.25) firstMove = n * CONFIG.step;
+    maxStall = Math.max(maxStall, f.recovery.stall(v)); overlap = Math.max(overlap, soldierOverlap(sim, v));
+  }
+  return { firstMove, maxStall, overlap };
+}
+
+test('a crew on a plateau the truck graph cannot leave stays on foot', () => {
+  // Tall rocks ring the crew with gaps a soldier fits through but a truck does not.
+  const sim = recoveryWorld(rockRing(0, -14, 6, 13));
+  spawn(sim, 1, 0, 20);
+  const slots = [spawn(sim, 0, -0.75, -14), spawn(sim, 0, 0.75, -14), spawn(sim, 0, 0, -14.68)];
+  paint(sim, 0, -14, 1.1, 1);
+  tick(sim, 30);
+  assert.equal(sim.vehicles.count, 0);
+  assert.ok(slots.every(i => sim.vehicles.onFoot(i)));
+  assert.ok(sim.vehicles.metrics.placementIsolated > 0);
+});
+
+test('a wedged truck whose plans give no way out backs out along its trail', () => {
+  // The truck curves in past a rock and is pinned against it: straight back is blocked, its own track is not.
+  const sim = recoveryWorld([...rockLine(-6, 2.7, 6, 2.7), [0.4, -3.2], [1.9, -0.6]]), f = sim.vehicles;
+  toughEnemy(sim, 0, 18);
+  const v = crew(sim, 0, -4, -8);
+  f.setPose(v, -4, -7, 0.5); f.exitLeft[v] = 0;
+  const trace = f.startTrace(), track: number[][] = [];
+  let pinnedAt: number[] | null = null, maxStall = 0;
+  for (let n = 0; n < 300; n++) {
+    if (!f.recovery.retreating(v) && f.metrics.retreats === 0) {
+      // Stand-in for a planner with nothing better: keep driving the same curve, ignore recovery requests.
+      f.mode[v] = Maneuver.Approach; f.desiredYaw[v] = f.z[v] < -4.5 ? 0.6 : 0.9; f.desiredSpeed[v] = 3;
+      f.due[v] = f.committedUntil[v] = Infinity; f.urgent[v] = 0;
+      track.push([f.x[v], f.z[v]]);
+    } else pinnedAt ??= [f.x[v], f.z[v]];
+    tick(sim);
+    maxStall = Math.max(maxStall, f.recovery.stall(v));
+    if (pinnedAt && f.recovery.retreating(v)) {
+      const near = Math.min(...track.map(([x, z]) => Math.hypot(f.x[v] - x, f.z[v] - z)));
+      assert.ok(near < 0.35, `reverses along the way in (${near.toFixed(2)} off it)`);
+    }
+  }
+  assert.equal(f.metrics.retreats, 1);
+  assert.equal(f.metrics.stuck, 0);
+  assert.ok(maxStall < 1.5, `stall ${maxStall.toFixed(2)}s`);
+  assert.ok(Math.hypot(f.x[v] - pinnedAt![0], f.z[v] - pinnedAt![1]) > 2, 'backed well clear');
+  const steps = trace.report().trucks[0].events.filter(e => e.kind === 'escalation').map(e => e.kind === 'escalation' && e.step);
+  assert.deepEqual(steps.slice(0, 2), ['replan', 'retreat']);
+});
+
+test('two trucks touching at an angle can drive along their length but not deeper into each other', () => {
+  const sim = battle(), f = sim.vehicles, a = crew(sim, 0, 0, 0), b = crew(sim, 0, 6, 0);
+  // Side by side at a slight angle with a little overlap, as a jam leaves them. One disk pair passing
+  // another used to read as a bump in both directions and glued the pair together.
+  parked(sim, a, 0, 0, 0); parked(sim, b, 1.04, 0, 0.15);
+  const move = (dx: number, dz: number) => f.ground.clear(a, 0, 0, 0, dx, dz, 0, 0, 'none');
+  assert.ok(move(0, 0.3), 'forward along the neighbour is clear');
+  assert.ok(move(0, -0.3), 'reverse along the neighbour is clear');
+  assert.ok(!move(0.1, 0), 'pushing sideways into the neighbour is not');
+});
+
+test('two allied trucks meeting nose to nose in a one-lane gap both get through', () => {
+  const sim = recoveryWorld([...rockLine(-27, 0, -1.9, 0), ...rockLine(1.9, 0, 27, 0)]), f = sim.vehicles;
+  toughEnemy(sim, 0, 16);
+  const north = crew(sim, 0, 0, -7), south = crew(sim, 0, 0, 7);
+  f.setPose(north, 0, -6, 0); f.setPose(south, 0, 5, Math.PI); f.exitLeft[north] = f.exitLeft[south] = 0;
+  let maxStall = 0, farthestNorth = -Infinity, farthestSouth = Infinity, closest = Infinity;
+  for (let n = 0; n < 900; n++) {
+    // One truck pulls back south through the gap (as after a pass) while the other drives north into it.
+    if (n < 180 && !f.recovery.stall(south)) {
+      f.mode[south] = Maneuver.Escape; f.desiredYaw[south] = Math.PI; f.desiredSpeed[south] = 4;
+      f.due[south] = f.committedUntil[south] = sim.time + 1;
+    }
+    tick(sim);
+    maxStall = Math.max(maxStall, f.recovery.stall(north), f.recovery.stall(south));
+    farthestNorth = Math.max(farthestNorth, f.z[north]); farthestSouth = Math.min(farthestSouth, f.z[south]);
+    closest = Math.min(closest, Math.hypot(f.x[north] - f.x[south], f.z[north] - f.z[south]));
+  }
+  assert.ok(closest < 2.4, 'they met in the gap');
+  assert.ok(farthestNorth > 1.5, `the northbound truck crossed (${farthestNorth.toFixed(1)})`);
+  assert.ok(farthestSouth < -1.5, `the southbound truck crossed (${farthestSouth.toFixed(1)})`);
+  assert.equal(f.metrics.stuck, 0);
+  assert.ok(maxStall < 2);
+});
+
+test('a truck in a packed allied crowd moves within 2s without driving over anyone', () => {
+  const sim = recoveryWorld([[-24, 30]]), f = sim.vehicles;
+  toughEnemy(sim, 0, 18);
+  const v = crew(sim, 0, 0, 0);
+  f.setPose(v, 0, 0, 0);
+  for (let x = -4; x <= 4; x += 0.62) for (let z = -4; z <= 4; z += 0.62) sim.spawn(0, x, z, WEAPON_ID.rifle);
+  const run = crowdRun(sim, v, 240);
+  assert.ok(run.firstMove < 2, `moved after ${run.firstMove}s`);
+  assert.ok(run.maxStall < 2);
+  assert.ok(run.overlap < 0.05, `overlap ${run.overlap.toFixed(3)}`);
+  assert.equal(f.metrics.stuck, 0);
+  assert.ok(f.metrics.makeWay > 0, 'allies were asked to make way');
+});
+
+test('a truck nosed into a wall and surrounded by allies moves within 2s', () => {
+  const sim = recoveryWorld(rockLine(-8, 3, 8, 3)), f = sim.vehicles;
+  toughEnemy(sim, 0, 18);
+  const v = crew(sim, 0, 0, 0);
+  f.setPose(v, 0, 1, 0);
+  for (let x = -3.5; x <= 3.5; x += 0.6) for (let z = -3; z <= 2.2; z += 0.6) sim.spawn(0, x, z, WEAPON_ID.rifle);
+  const run = crowdRun(sim, v, 240);
+  assert.ok(run.firstMove < 2, `moved after ${run.firstMove}s`);
+  assert.ok(run.maxStall < 2);
+  assert.ok(run.overlap < 0.05, `overlap ${run.overlap.toFixed(3)}`);
+  assert.equal(f.metrics.stuck, 0);
 });

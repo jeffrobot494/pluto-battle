@@ -15,7 +15,7 @@ import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
 import type { TruckTraceReport } from './truck-trace.ts';
 import { serializeTruckTrace } from './truck-trace-export.ts';
-import { BENCHMARK_SCENARIOS, VehicleBenchmark, benchmarkTuning, usesTrucks, type BenchmarkScenario } from './vehicle-benchmark.ts';
+import { BENCHMARK_SCENARIOS, VehicleBenchmark, benchmarkTuning, liftBenchmarkLimits, usesTrucks, type BenchmarkScenario } from './vehicle-benchmark.ts';
 import { BattleInput, type GroundPoint } from './battle-input.ts';
 import { UpgradeMenu } from './upgrade-menu.ts';
 import { SoldierCard } from './soldier-card.ts';
@@ -332,7 +332,7 @@ function setPaused(value: boolean) {
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
-function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, benchmark?: BenchmarkScenario, replay?: Replay) {
+function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, benchmark?: BenchmarkScenario, replay?: Replay, area = 1) {
   if (!replay && replayBackup) endReplayMode();
   if (!replay && equipmentTab && !equipmentTab.valid) { tuningPanel.showPage(equipmentTab.id); return false; }
   stopBenchmark('Benchmark stopped: new battle.');
@@ -341,7 +341,8 @@ function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, be
     replayBackup ??= { tuning: { ...tuning }, equipment: copyEquipment(equipment) };
     tuning = { ...replay.header.tuning }; equipment = copyEquipment(replay.header.equipment);
   }
-  const candidate = benchmark ? benchmarkTuning(tuning, benchmark) : { ...tuning };
+  liftBenchmarkLimits(benchmark ? area : 1);
+  const candidate = benchmark ? benchmarkTuning(tuning, benchmark, area) : { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
   if (!benchmark) tuning = candidate;
@@ -500,10 +501,12 @@ $('#zoom-out').addEventListener('click', () => renderer.zoom(1 / 1.2));
 $('#diagnostics-toggle').addEventListener('click', () => toggleDiagnostics());
 $('#close-diagnostics').addEventListener('click', () => toggleDiagnostics(false));
 $('#quality').addEventListener('change', () => renderer.setQuality($('#quality') instanceof HTMLSelectElement && $<HTMLSelectElement>('#quality').value === 'low' ? 'low' : 'balanced'));
-function startBenchmark(warmup = 300, duration = 600, scenario: BenchmarkScenario = 'infantry') {
+/** `area` multiplies the benchmark battlefield's area past the Tuning limits; capture scripts only. */
+function startBenchmark(warmup = 300, duration = 600, scenario: BenchmarkScenario = 'infantry', area = 1) {
+  if (!(area >= 1 && area <= 8)) return false;
   if (!BENCHMARK_SCENARIOS.some(({ id }) => id === scenario)) return false;
   if (usesTrucks(scenario) && effectiveTurretRange(tuning) === null) { $('#benchmark-status').textContent = TURRET_RANGE_ERROR; return false; }
-  if (!restart(undefined, seed, terrainSeed, scenario)) return false;
+  if (!restart(undefined, seed, terrainSeed, scenario, undefined, area)) return false;
   recorder = null; // Benchmarks write health directly, which a replay cannot reproduce.
   sim.hp.fill(1e8, 0, sim.used);
   benchmarkFixture = new VehicleBenchmark(scenario);
