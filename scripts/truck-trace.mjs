@@ -6,6 +6,7 @@ import { prepareTerrain } from '../src/navigation.ts';
 import { BattleSimulation } from '../src/simulation.ts';
 import { archetypeById } from '../src/terrain-archetypes.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
+import { serializeTruckTrace } from '../src/truck-trace-export.ts';
 
 const { values } = parseArgs({
   options: {
@@ -14,6 +15,7 @@ const { values } = parseArgs({
     'battle-seed': { type: 'string', default: String(CONFIG.seed) },
     soldiers: { type: 'string', default: '30' },
     seconds: { type: 'string', default: '60' },
+    full: { type: 'boolean', default: false },
     output: { type: 'string', default: 'artifacts/truck-trace.json' },
   },
 });
@@ -42,7 +44,7 @@ while (sim.tick < ticks && sim.result === 'running') sim.step();
 const report = sim.vehicles.stopTrace();
 const path = resolve(values.output);
 await mkdir(dirname(path), { recursive: true });
-await writeFile(path, JSON.stringify(report));
+await writeFile(path, serializeTruckTrace(report, values.full));
 
 const byId = new Map(report.trucks.map(truck => [truck.id, truck]));
 const episodes = report.trucks.reduce((sum, truck) => sum + truck.stopCount, 0);
