@@ -88,6 +88,7 @@ h1 span { display: block; font-size: 8px; color: #c7bfc3; letter-spacing: 0.21em
 .settings button svg { width: 14px; height: 14px; }
 #diagnostics p { font-size: 9px; color: #9d8ca1; line-height: 1.7; margin-bottom: 0; }
 .truck-trace-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#truck-trace-save-full { grid-column: 2; }
 .truck-trace-actions button:disabled { opacity: 0.4; cursor: default; }
 .sound-panel { position: absolute; left: 34px; bottom: 107px; width: 315px; max-width: calc(100% - 68px); max-height: calc(100dvh - 210px); overflow: auto; border: 1px solid #ffffff2b; border-radius: 5px; background: #1e1925f2; backdrop-filter: blur(15px); box-shadow: 0 10px 50px #100b1b44; }
 .sound-panel:not([open]) { width: 235px; background: #221b27cf; }

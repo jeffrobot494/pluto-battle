@@ -23,6 +23,7 @@ export interface RouteBlock {
 
 export interface RecoveryCheck {
   direction: 'reverse' | 'forward';
+  steering?: number;
   blockedBy: RouteBlock | null;
 }
 

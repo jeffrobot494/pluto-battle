@@ -14,6 +14,7 @@ import { prepareTerrain } from './navigation.ts';
 import { archetypeById, pickArchetype } from './terrain-archetypes.ts';
 import { PerformanceCapture } from './performance-capture.ts';
 import type { TruckTraceReport } from './truck-trace.ts';
+import { serializeTruckTrace } from './truck-trace-export.ts';
 import { BENCHMARK_SCENARIOS, VehicleBenchmark, benchmarkTuning, usesTrucks, type BenchmarkScenario } from './vehicle-benchmark.ts';
 import { BattleInput, type GroundPoint } from './battle-input.ts';
 import { UpgradeMenu } from './upgrade-menu.ts';
@@ -74,7 +75,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <aside id="diagnostics" hidden aria-label="Performance and battle settings">
       <div class="panel-heading"><span>FIELD DIAGNOSTICS</span><button id="close-diagnostics" aria-label="Close diagnostics">×</button></div>
       <dl id="metrics"></dl>
-      <div class="settings truck-trace-actions"><button id="truck-trace-toggle">Record trucks</button><button id="truck-trace-save" disabled>Save truck trace</button></div>
+      <div class="settings truck-trace-actions"><button id="truck-trace-toggle">Record trucks</button><button id="truck-trace-save" disabled>Save truck trace</button><button id="truck-trace-save-full" disabled>Save full trace</button></div>
       <p id="truck-trace-status" role="status">Record driving decisions and flag trucks that stop for 2 seconds.</p>
       <div class="settings"><label for="deployment">Deployment preset <select id="deployment"><option value="custom" disabled>Custom · tuning panel</option><option value="100">100 vs 100</option><option value="250">250 vs 250</option><option value="500">500 vs 500</option></select></label><label for="quality">Visual quality <select id="quality"><option value="balanced">Adaptive · up to 1.5× pixels</option><option value="low">Low · up to 1× pixels</option></select></label><button id="apply-battle">Deploy preset ${icons.restart}</button></div>
       <p>Restart replays this map; New map (N) rolls a different landscape. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
@@ -444,8 +445,8 @@ $('#benchmark-start').addEventListener('click', () => {
   if (capture.active) stopBenchmark();
   else startBenchmark(300, 600, $<HTMLSelectElement>('#benchmark-scenario').value as BenchmarkScenario);
 });
-function downloadJson(data: object, filename: string, indent?: number) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, indent)], { type: 'application/json' }));
+function downloadJson(json: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
@@ -453,7 +454,7 @@ function downloadJson(data: object, filename: string, indent?: number) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 $('#benchmark-save').addEventListener('click', () => {
-  if (capture.report) downloadJson(capture.report, `pluto-1000-${capture.report.scenario}-${terrainSeed}.json`, 2);
+  if (capture.report) downloadJson(JSON.stringify(capture.report, null, 2), `pluto-1000-${capture.report.scenario}-${terrainSeed}.json`);
 });
 
 function truckTraceReport() { return sim.vehicles.trace?.report() ?? savedTruckTrace; }
@@ -462,7 +463,9 @@ function updateTruckTraceControls() {
   const button = $<HTMLButtonElement>('#truck-trace-toggle');
   button.textContent = trace ? 'Stop recording' : 'Record trucks';
   button.disabled = !trace && sim.result !== 'running';
-  $<HTMLButtonElement>('#truck-trace-save').disabled = !trace && !savedTruckTrace;
+  const canSave = Boolean(trace || savedTruckTrace);
+  $<HTMLButtonElement>('#truck-trace-save').disabled = !canSave;
+  $<HTMLButtonElement>('#truck-trace-save-full').disabled = !canSave;
   const status = $('#truck-trace-status');
   const message = trace ? `${paused ? 'Recording paused' : 'Recording'} · ${trace.trackedCount} tracked · ${trace.stoppedCount} stopped`
     : savedTruckTrace ? `Trace ready · ${savedTruckTrace.trucks.length} tracked · ${savedTruckTrace.stoppedTruckIds.length} stopped at end`
@@ -485,10 +488,12 @@ $('#truck-trace-toggle').addEventListener('click', () => {
   if (sim.vehicles.trace) stopTruckTrace();
   else startTruckTrace();
 });
-$('#truck-trace-save').addEventListener('click', () => {
+function saveTruckTrace(full: boolean) {
   const report = truckTraceReport();
-  if (report) downloadJson(report, `pluto-trucks-${report.map}-${report.terrainSeed}-tick-${report.throughTick}.json`);
-});
+  if (report) downloadJson(serializeTruckTrace(report, full), `pluto-trucks-${report.map}-${report.terrainSeed}-tick-${report.throughTick}${full ? '-full' : ''}.json`);
+}
+$('#truck-trace-save').addEventListener('click', () => saveTruckTrace(false));
+$('#truck-trace-save-full').addEventListener('click', () => saveTruckTrace(true));
 $('#apply-battle').addEventListener('click', () => {
   const count = Number($<HTMLSelectElement>('#deployment').value);
   if (Number.isFinite(count)) restart(count, undefined, terrainSeed);
