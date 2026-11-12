@@ -3,7 +3,7 @@ import { CONFIG } from './config.ts';
 /**
  * Rockets in flight: a dense, fixed-capacity pool (active rockets occupy 0..count-1, removal swaps the last in).
  * Each rocket flies a straight line; `limit` is the precomputed distance to the terrain (terrain is static,
- * so it is raycast once at launch) or to the fuse / field edge. Only soldiers are tested while in flight.
+ * so it is raycast once at launch) or to the fuse / field edge. Soldiers and hulls are tested while in flight.
  */
 export class Rockets {
   readonly capacity = CONFIG.rocket.maxInFlight;
@@ -22,15 +22,16 @@ export class Rockets {
   readonly detonate = new Uint8Array(this.capacity);
   /** Shooter's soldier ID. A rocket never collides with its own shooter (the blast still can hurt him). */
   readonly owner = new Uint32Array(this.capacity);
+  readonly ownerVehicle = new Uint32Array(this.capacity);
   readonly team = new Uint8Array(this.capacity);
   count = 0;
 
-  add(x: number, y: number, z: number, dx: number, dy: number, dz: number, limit: number, detonate: boolean, owner: number, team: number) {
+  add(x: number, y: number, z: number, dx: number, dy: number, dz: number, limit: number, detonate: boolean, owner: number, team: number, vehicle = 0) {
     if (this.count >= this.capacity) return false;
     const n = this.count++;
     this.x[n] = this.previousX[n] = x; this.y[n] = this.previousY[n] = y; this.z[n] = this.previousZ[n] = z;
     this.dx[n] = dx; this.dy[n] = dy; this.dz[n] = dz;
-    this.travelled[n] = 0; this.limit[n] = limit; this.detonate[n] = +detonate; this.owner[n] = owner; this.team[n] = team;
+    this.travelled[n] = 0; this.limit[n] = limit; this.detonate[n] = +detonate; this.owner[n] = owner; this.team[n] = team; this.ownerVehicle[n] = vehicle;
     return true;
   }
 
@@ -40,6 +41,7 @@ export class Rockets {
     this.x[n] = this.x[last]; this.y[n] = this.y[last]; this.z[n] = this.z[last];
     this.previousX[n] = this.previousX[last]; this.previousY[n] = this.previousY[last]; this.previousZ[n] = this.previousZ[last];
     this.dx[n] = this.dx[last]; this.dy[n] = this.dy[last]; this.dz[n] = this.dz[last];
+    this.ownerVehicle[n] = this.ownerVehicle[last];
     this.travelled[n] = this.travelled[last]; this.limit[n] = this.limit[last]; this.detonate[n] = this.detonate[last];
     this.owner[n] = this.owner[last]; this.team[n] = this.team[last];
   }

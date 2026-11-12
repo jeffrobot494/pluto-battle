@@ -1,4 +1,5 @@
 import { WEAPONS } from './config.ts';
+import { TURRET_RANGE_ERROR } from './tuning.ts';
 import { TARGET_KEY, UPGRADE_TARGETS, UPGRADES, type Upgrade, type UpgradeId, type UpgradeTarget, type UpgradeTargetId } from './upgrades.ts';
 
 /**
@@ -10,19 +11,20 @@ export class UpgradeMenu {
   private readonly status: HTMLElement;
   private current: Upgrade | null = null;
   private currentTarget: UpgradeTarget = UPGRADE_TARGETS[0];
+  private truckRange: number | null = null;
   private statusTimer = 0;
 
   constructor(host: HTMLElement, private readonly onChange: (upgrade: Upgrade | null) => void) {
     host.insertAdjacentHTML('beforeend', `
       <div class="upgrade-controls">
-        <nav id="upgrade-menu" class="upgrade-menu" aria-label="Weapon upgrades">
+        <nav id="upgrade-menu" class="upgrade-menu" aria-label="Battlefield upgrades">
           <span class="upgrade-title">UPGRADE</span>
           <div class="upgrade-target" role="radiogroup" aria-label="Zone upgrades (${TARGET_KEY})" title="Army a held zone upgrades (${TARGET_KEY})">
             ${UPGRADE_TARGETS.map(t => `<button role="radio" data-target="${t.id}" aria-checked="${t === this.currentTarget}" style="--target: ${t.color}" title="Zone upgrades ${t.name} (${TARGET_KEY})">${t.label}</button>`).join('')}
           </div>
-          ${UPGRADES.map(u => `<button class="upgrade-button" data-upgrade="${u.id}" aria-pressed="false" style="--upgrade: ${u.color}" title="${u.name}: ${WEAPONS[u.weapon].range} range (${u.key})">
+          ${UPGRADES.map(u => `<button class="upgrade-button" data-upgrade="${u.id}" aria-pressed="false" style="--upgrade: ${u.color}" title="${u.kind === 'weapon' ? `${u.name}: ${WEAPONS[u.weapon].range} range` : u.name} (${u.key})">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">${u.icon}</svg>
-            <span>${u.label}</span><small>RNG ${WEAPONS[u.weapon].range}</small><kbd aria-hidden="true">${u.key}</kbd></button>`).join('')}
+            <span>${u.label}</span><small>${u.kind === 'weapon' ? `RNG ${WEAPONS[u.weapon].range}` : 'CREW 1–3'}</small><kbd aria-hidden="true">${u.key}</kbd></button>`).join('')}
         </nav>
         <p id="upgrade-status" class="upgrade-status" role="status" aria-live="polite"></p>
       </div>`);
@@ -54,7 +56,18 @@ export class UpgradeMenu {
     for (const button of this.element.querySelectorAll<HTMLButtonElement>('[data-target]')) button.setAttribute('aria-checked', String(button.dataset.target === this.currentTarget.id));
     this.element.style.setProperty('--zone-target', this.currentTarget.color);
   }
-  private armedMessage() { return `${this.current!.name} → ${this.currentTarget.name}: hold to upgrade an area, or tap a soldier`; }
+  setTruckRange(range: number | null, conflict = range === null) {
+    const unavailable = this.truckRange === null;
+    this.truckRange = conflict ? null : range;
+    const button = this.element.querySelector<HTMLButtonElement>('[data-upgrade="truck"]')!;
+    button.title = this.truckRange === null ? TURRET_RANGE_ERROR : `Armored truck · turret range ${this.truckRange.toFixed(2)} u (4)`;
+    button.querySelector('small')!.textContent = this.truckRange === null ? 'CHECK RANGE' : `RNG ${this.truckRange.toFixed(1)}`;
+    if (this.current?.id === 'truck' && (conflict || unavailable)) this.say(this.armedMessage(), 7);
+  }
+  private armedMessage() {
+    if (this.current?.id === 'truck') return this.truckRange === null ? TURRET_RANGE_ERROR : `Truck → ${this.currentTarget.name}: hold to paint a crew`;
+    return `${this.current!.name} → ${this.currentTarget.name}: hold to upgrade an area, or tap a soldier`;
+  }
   toggle(id: UpgradeId) { this.select(this.current?.id === id ? null : id); }
   select(id: UpgradeId | null) {
     const next = UPGRADES.find(u => u.id === id) ?? null;

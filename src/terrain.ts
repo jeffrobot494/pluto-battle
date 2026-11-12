@@ -2,6 +2,7 @@ import { random } from './random.ts';
 import type { TuningValues } from './tuning.ts';
 import { archetypeById, mirrored, pickArchetype, spires, type GenerationContext, type Landform, type TerrainPalette } from './terrain-archetypes.ts';
 import { Noise, clamp, gradeProfile, lerp, polylineDistance, smooth } from './terrain-shapes.ts';
+import type { TruckBlocker } from './vehicle-types.ts';
 
 export type { Landform, TerrainPalette } from './terrain-archetypes.ts';
 export interface Rock { x: number; z: number; radius: number; base: number; height: number; angle: number }
@@ -88,10 +89,13 @@ export class Terrain {
         for (let c = this.column(rock.x - rock.radius); c <= this.column(rock.x + rock.radius); c++) this.buckets[r * this.columns + c].push(i);
     }
   }
+  private supports(x: number, z: number, radius: number, slope: number) {
+    return this.slopeAt(x, z) <= slope && this.slopeAt(x - radius, z) <= slope && this.slopeAt(x + radius, z) <= slope
+      && this.slopeAt(x, z - radius) <= slope && this.slopeAt(x, z + radius) <= slope;
+  }
   canStand(x: number, z: number, radius: number) {
     if (Math.abs(x) > this.halfWidth - radius || Math.abs(z) > this.halfDepth - radius) return false;
-    if (this.slopeAt(x, z) > MAX_SLOPE || this.slopeAt(x - radius, z) > MAX_SLOPE || this.slopeAt(x + radius, z) > MAX_SLOPE
-      || this.slopeAt(x, z - radius) > MAX_SLOPE || this.slopeAt(x, z + radius) > MAX_SLOPE) return false;
+    if (!this.supports(x, z, radius, MAX_SLOPE)) return false;
     for (let r = this.row(z - radius); r <= this.row(z + radius); r++) for (let c = this.column(x - radius); c <= this.column(x + radius); c++) {
       for (const i of this.buckets[r * this.columns + c]) {
         const rock = this.rocks[i], ox = x - rock.x, oz = z - rock.z;
@@ -102,6 +106,59 @@ export class Terrain {
           if (ox * Math.cos(a) + oz * Math.sin(a) > rock.radius * APOTHEM + radius) { outside = true; break; }
         }
         if (!outside) return false;
+      }
+    }
+    return true;
+  }
+  /** Ground clearance for one disk of a vehicle footprint. Clip the whole sweep against the expanded rock sides. */
+  driveClear(x: number, z: number, tx: number, tz: number, radius: number, slope: number, blocker?: TruckBlocker) {
+    const left = Math.min(x, tx) - radius, right = Math.max(x, tx) + radius;
+    const near = Math.min(z, tz) - radius, far = Math.max(z, tz) + radius;
+    if (left < -this.halfWidth || right > this.halfWidth || near < -this.halfDepth || far > this.halfDepth) {
+      if (blocker) {
+        const atStart = Math.abs(x) + radius > this.halfWidth || Math.abs(z) + radius > this.halfDepth;
+        blocker.kind = 'map-edge'; blocker.id = null; blocker.atStart = atStart;
+        blocker.x = atStart ? x : tx; blocker.z = atStart ? z : tz;
+      }
+      return false;
+    }
+    if (this.maxHeight === this.minHeight && !this.rocks.length) return true;
+    const dx = tx - x, dz = tz - z;
+    const samples = Math.max(1, Math.ceil(Math.hypot(dx, dz) / 0.22));
+    for (let s = 1; s <= samples; s++) {
+      const qx = x + dx * s / samples, qz = z + dz * s / samples;
+      if (this.supports(qx, qz, radius, slope)) continue;
+      if (blocker) {
+        blocker.kind = 'slope'; blocker.id = null; blocker.x = qx; blocker.z = qz;
+        blocker.atStart = !this.supports(x, z, radius, slope);
+      }
+      return false;
+    }
+    if (!this.rocks.length) return true;
+    if (++this.stamp === 0xffffffff) { this.rockStamp.fill(0); this.stamp = 1; }
+    for (let r = this.row(near); r <= this.row(far); r++) for (let c = this.column(left); c <= this.column(right); c++) {
+      for (const i of this.buckets[r * this.columns + c]) {
+        if (this.rockStamp[i] === this.stamp) continue;
+        this.rockStamp[i] = this.stamp;
+        const rock = this.rocks[i];
+        if (rock.x + rock.radius < left || rock.x - rock.radius > right || rock.z + rock.radius < near || rock.z - rock.radius > far) continue;
+        let enter = 0, leave = 1;
+        for (let s = 0; s < SIDES && enter <= leave; s++) {
+          const angle = rock.angle + (s + 0.5) * Math.PI * 2 / SIDES;
+          const nx = Math.cos(angle), nz = Math.sin(angle);
+          const offset = (x - rock.x) * nx + (z - rock.z) * nz - rock.radius * APOTHEM - radius;
+          const speed = dx * nx + dz * nz;
+          if (speed < -1e-10) enter = Math.max(enter, -offset / speed);
+          else if (speed > 1e-10) leave = Math.min(leave, -offset / speed);
+          else if (offset > 0) leave = -1;
+        }
+        if (enter <= leave) {
+          if (blocker) {
+            blocker.kind = 'rock'; blocker.id = i; blocker.x = rock.x; blocker.z = rock.z;
+            blocker.atStart = enter === 0 && Math.abs(x - rock.x) <= rock.radius + radius && Math.abs(z - rock.z) <= rock.radius + radius;
+          }
+          return false;
+        }
       }
     }
     return true;

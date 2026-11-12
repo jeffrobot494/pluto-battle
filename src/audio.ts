@@ -1,5 +1,6 @@
 import type { BattleSimulation } from './simulation.ts';
 import { WEAPON_ID } from './config.ts';
+import { TURRET_EFFECT } from './vehicle-types.ts';
 import { readSetting, writeSetting } from './settings-store.ts';
 
 export const SOUND_EFFECTS = [
@@ -148,7 +149,7 @@ export class BattleAudio {
       const id: SoundId = kind === 'shot' ? 'laser'
         : events.team[i] === 0 ? kind === 'death' ? 'plutonianDeath' : 'plutonianHit'
           : kind === 'death' ? 'sectoidDeath' : 'sectoidHit';
-      const rate = kind !== 'shot' ? 1 : events.weapon[i] === WEAPON_ID.sniper ? 0.65 : events.weapon[i] === WEAPON_ID.shotgun ? 0.42 : events.weapon[i] === WEAPON_ID.rocket ? 0.3 : 1;
+      const rate = kind !== 'shot' ? 1 : events.weapon[i] === WEAPON_ID.sniper ? 0.65 : events.weapon[i] === WEAPON_ID.shotgun ? 0.42 : events.weapon[i] === WEAPON_ID.rocket ? 0.3 : events.weapon[i] === TURRET_EFFECT ? 0.76 : 1;
       this.play(id, Math.max(-0.75, Math.min(0.75, events.x[i] / sim.grid.halfWidth)), false, rate);
     }
   }
