@@ -77,22 +77,6 @@ export function infantryProfile(radius: number): NavigationProfile {
   };
 }
 
-/** Chamfer distance from each cell to the nearest blocked cell or map edge. */
-function clearanceMap(walkable: Uint8Array, columns: number, rows: number, dx: number, dz: number) {
-  const size = columns * rows, d = new Float32Array(size), diagonal = Math.hypot(dx, dz);
-  for (let n = 0; n < size; n++) d[n] = walkable[n] ? Infinity : 0;
-  const at = (c: number, r: number) => c < 0 || r < 0 || c >= columns || r >= rows ? 0 : d[r * columns + c];
-  for (let r = 0; r < rows; r++) for (let c = 0; c < columns; c++) {
-    const n = r * columns + c; if (!d[n]) continue;
-    d[n] = Math.min(d[n], at(c - 1, r) + dx, at(c, r - 1) + dz, at(c - 1, r - 1) + diagonal, at(c + 1, r - 1) + diagonal);
-  }
-  for (let r = rows - 1; r >= 0; r--) for (let c = columns - 1; c >= 0; c--) {
-    const n = r * columns + c; if (!d[n]) continue;
-    d[n] = Math.min(d[n], at(c + 1, r) + dx, at(c, r + 1) + dz, at(c + 1, r + 1) + diagonal, at(c - 1, r + 1) + diagonal);
-  }
-  return d;
-}
-
 class FlowField {
   readonly distance: Float32Array;
   readonly pending: Float32Array;
@@ -119,6 +103,139 @@ class FlowField {
   constructor(size: number, blocks: number) {
     this.distance = new Float32Array(size).fill(Infinity); this.pending = new Float32Array(size).fill(Infinity); this.heap = new Heap(this.pending);
     this.congestion = new Float32Array(size); this.firing = new Uint32Array(size); this.screen = new Uint8Array(size); this.reps = new Int32Array(blocks); this.candidates = new Int32Array(size);
+  }
+}
+
+/** Build passes, in order. The first two run the profile's predicates; the rest are cheap array sweeps. */
+const STAND = 0, EDGES = 1, REGIONS = 2, CLEAR_FORWARD = 3, CLEAR_BACKWARD = 4, BUILT = 5;
+/** Cells of a cheap pass that cost one budget unit (one predicate cell). */
+const CHEAP_CELLS = 16;
+
+/** A graph build (stand tests, edge tests, regions, clearance and crowding), resumable on a work budget.
+ * A budget unit is one cell of a predicate pass (a stand test, or up to four edge tests) or CHEAP_CELLS cells of
+ * an array sweep. Budgets count cells, never time, so a build split across ticks finishes on the same tick every run,
+ * and the result is the same however the work is split. */
+export class NavigationBuild {
+  readonly terrain: Terrain;
+  readonly profile: NavigationProfile;
+  readonly walkable: Uint8Array;
+  readonly edges: Uint8Array;
+  readonly elevation: Float32Array;
+  readonly regions: Int32Array;
+  readonly queue: Int32Array;
+  /** Chamfer distance from each cell to the nearest blocked cell or map edge. */
+  readonly clearance: Float32Array;
+  /** Field cost multiplier per node: >1 in narrow slots so movers prefer wide approaches. */
+  readonly crowding: Float32Array;
+  readonly offsets: number[];
+  regionCount = 0;
+  /** Wall time spent in `step` (diagnostics only). */
+  ms = 0;
+  private pass = STAND;
+  /** Next cell (or row, for the clearance passes) of the current pass. */
+  private cursor = 0;
+  private head = 0;
+  private tail = 0;
+  constructor(terrain: Terrain, profile: NavigationProfile) {
+    this.terrain = terrain; this.profile = profile;
+    const size = terrain.columns * terrain.rows;
+    this.walkable = new Uint8Array(size); this.edges = new Uint8Array(size); this.elevation = new Float32Array(size);
+    this.regions = new Int32Array(size).fill(-1); this.queue = new Int32Array(size);
+    this.clearance = new Float32Array(size); this.crowding = new Float32Array(size);
+    this.offsets = DX.map((x, i) => x + DZ[i] * terrain.columns);
+  }
+  get done() { return this.pass === BUILT; }
+  /** Share of the build done, 0–1, weighted by budget units. */
+  get progress() {
+    const size = this.walkable.length, rows = this.terrain.rows, cheap = size / CHEAP_CELLS, total = 2 * size + 3 * cheap;
+    const at = this.pass === STAND ? this.cursor : this.pass === EDGES ? size + this.cursor
+      : this.pass === REGIONS ? 2 * size + this.cursor / CHEAP_CELLS
+      : this.pass === CLEAR_FORWARD ? 2 * size + cheap + this.cursor / rows * cheap
+      : this.pass === CLEAR_BACKWARD ? 2 * size + 2 * cheap + this.cursor / rows * cheap : total;
+    return at / total;
+  }
+  /** Runs up to `budget` units of work; returns true once the build is complete. */
+  step(budget = Infinity) {
+    const start = performance.now();
+    while (budget > 0 && this.pass !== BUILT) {
+      if (this.pass === STAND) budget = this.stand(budget);
+      else if (this.pass === EDGES) budget = this.link(budget);
+      else if (this.pass === REGIONS) budget = this.label(budget * CHEAP_CELLS) / CHEAP_CELLS;
+      else budget = this.clear(budget * CHEAP_CELLS) / CHEAP_CELLS;
+    }
+    this.ms += performance.now() - start;
+    return this.done;
+  }
+  private x(n: number) { return -this.terrain.halfWidth + (n % this.terrain.columns + 0.5) * this.terrain.dx; }
+  private z(n: number) { return -this.terrain.halfDepth + (Math.floor(n / this.terrain.columns) + 0.5) * this.terrain.dz; }
+  private next() { this.pass++; this.cursor = 0; }
+  private stand(budget: number) {
+    const t = this.terrain, end = Math.min(this.walkable.length, this.cursor + budget);
+    for (let node = this.cursor; node < end; node++) { this.walkable[node] = +this.profile.stand(t, this.x(node), this.z(node)); this.elevation[node] = t.heightAt(this.x(node), this.z(node)); }
+    budget -= end - this.cursor; this.cursor = end;
+    if (end === this.walkable.length) this.next();
+    return budget;
+  }
+  private link(budget: number) {
+    const t = this.terrain, columns = t.columns, end = Math.min(this.walkable.length, this.cursor + budget);
+    for (let node = this.cursor; node < end; node++) if (this.walkable[node]) {
+      const c = node % columns, r = Math.floor(node / columns), x = this.x(node), z = this.z(node);
+      for (const dir of [0, 1, 4, 5]) {
+        if (c + DX[dir] < 0 || c + DX[dir] >= columns || r + DZ[dir] < 0 || r + DZ[dir] >= t.rows) continue;
+        const next = node + this.offsets[dir];
+        if (!this.walkable[next]) continue;
+        if (dir >= 4 && (!this.walkable[node + DX[dir]] || !this.walkable[node + DZ[dir] * columns])) continue;
+        if (this.profile.traverse(t, x, z, this.x(next), this.z(next))) {
+          this.edges[node] |= 1 << dir;
+          this.edges[next] |= 1 << (dir < 4 ? (dir + 2) % 4 : 4 + (dir - 4 + 2) % 4);
+        }
+      }
+    }
+    budget -= end - this.cursor; this.cursor = end;
+    if (end === this.walkable.length) this.next();
+    return budget;
+  }
+  /** Breadth-first region labels in node order. A unit is one cell scanned or dequeued. */
+  private label(cells: number) {
+    const size = this.walkable.length, queue = this.queue, regions = this.regions, edges = this.edges;
+    while (cells > 0) {
+      if (this.head < this.tail) {
+        const current = queue[this.head++]; cells--;
+        for (let dir = 0; dir < 8; dir++) if (edges[current] & 1 << dir) { const next = current + this.offsets[dir]; if (regions[next] < 0) { regions[next] = this.regionCount; queue[this.tail++] = next; } }
+        if (this.head === this.tail) this.regionCount++;
+        continue;
+      }
+      if (this.cursor === size) { this.head = this.tail = 0; this.next(); break; }
+      const node = this.cursor++; cells--;
+      if (this.walkable[node] && regions[node] < 0) { this.head = this.tail = 0; queue[this.tail++] = node; regions[node] = this.regionCount; }
+    }
+    return cells;
+  }
+  /** Two-pass chamfer clearance, a row at a time; the backward pass also fills crowding. */
+  private clear(cells: number) {
+    const t = this.terrain, columns = t.columns, rows = t.rows, d = this.clearance, dx = t.dx, dz = t.dz, diagonal = Math.hypot(dx, dz);
+    const at = (c: number, r: number) => c < 0 || r < 0 || c >= columns || r >= rows ? 0 : d[r * columns + c];
+    const { openClearance, narrowPenalty } = this.profile;
+    while (cells > 0 && this.pass !== BUILT) {
+      if (this.pass === CLEAR_FORWARD) {
+        const r = this.cursor;
+        for (let c = 0; c < columns; c++) { const n = r * columns + c; d[n] = this.walkable[n] ? Infinity : 0; }
+        for (let c = 0; c < columns; c++) {
+          const n = r * columns + c; if (!d[n]) continue;
+          d[n] = Math.min(d[n], at(c - 1, r) + dx, at(c, r - 1) + dz, at(c - 1, r - 1) + diagonal, at(c + 1, r - 1) + diagonal);
+        }
+      } else {
+        const r = rows - 1 - this.cursor;
+        for (let c = columns - 1; c >= 0; c--) {
+          const n = r * columns + c; if (!d[n]) continue;
+          d[n] = Math.min(d[n], at(c + 1, r) + dx, at(c, r + 1) + dz, at(c + 1, r + 1) + diagonal, at(c - 1, r + 1) + diagonal);
+        }
+        for (let c = 0; c < columns; c++) { const n = r * columns + c, k = Math.max(0, 1 - d[n] / openClearance); this.crowding[n] = 1 + narrowPenalty * k * k; }
+      }
+      cells -= columns;
+      if (++this.cursor === rows) this.next();
+    }
+    return cells;
   }
 }
 
@@ -159,41 +276,23 @@ export class Navigation {
   private fireQuery = 0;
   /** Running total of sight rays cast while seeding firing positions (diagnostics/benchmarks). */
   fireRays = 0;
-  /** A number is an infantry radius. */
-  constructor(terrain: Terrain, profile: NavigationProfile | number) {
+  /** A number is an infantry radius. A finished `NavigationBuild` supplies the graph; otherwise one runs to completion here. */
+  constructor(terrain: Terrain, profile: NavigationProfile | number, build?: NavigationBuild) {
     if (typeof profile === 'number') profile = infantryProfile(profile);
+    if (build && (build.terrain !== terrain || build.profile !== profile || !build.done)) throw new Error('Navigation needs a finished build of the same terrain and profile.');
     this.terrain = terrain; this.profile = profile; this.radius = profile.radius;
     const start = performance.now(), size = terrain.columns * terrain.rows;
-    this.walkable = new Uint8Array(size); this.edges = new Uint8Array(size); this.regions = new Int32Array(size).fill(-1); this.queue = new Int32Array(size);
-    this.offsets = DX.map((x, i) => x + DZ[i] * terrain.columns);
-    this.elevation = new Float32Array(size);
+    const prebuilt = build?.ms ?? 0;
+    if (!build) { build = new NavigationBuild(terrain, profile); build.step(); }
+    this.walkable = build.walkable; this.edges = build.edges; this.elevation = build.elevation; this.offsets = build.offsets;
+    this.regions = build.regions; this.queue = build.queue; this.regionCount = build.regionCount;
+    this.clearance = build.clearance; this.crowding = build.crowding;
     this.costs = DX.map((x, i) => Math.hypot(x * terrain.dx, DZ[i] * terrain.dz));
     const blocks = Math.ceil(terrain.columns / FIRE_BLOCK) * Math.ceil(terrain.rows / FIRE_BLOCK);
     this.fields = [new FlowField(size, blocks), new FlowField(size, blocks)];
     this.fireBlocks = new Uint32Array(blocks); this.fireCells = new Uint32Array(size);
-    for (let node = 0; node < size; node++) { this.walkable[node] = +profile.stand(terrain, this.x(node), this.z(node)); this.elevation[node] = terrain.heightAt(this.x(node), this.z(node)); }
-    for (let node = 0; node < size; node++) if (this.walkable[node]) {
-      const c = node % terrain.columns, r = Math.floor(node / terrain.columns), x = this.x(node), z = this.z(node);
-      for (const dir of [0, 1, 4, 5]) {
-        if (c + DX[dir] < 0 || c + DX[dir] >= terrain.columns || r + DZ[dir] < 0 || r + DZ[dir] >= terrain.rows) continue;
-        const next = node + this.offsets[dir];
-        if (!this.walkable[next]) continue;
-        if (dir >= 4 && (!this.walkable[node + DX[dir]] || !this.walkable[node + DZ[dir] * terrain.columns])) continue;
-        if (profile.traverse(terrain, x, z, this.x(next), this.z(next))) {
-          this.edges[node] |= 1 << dir;
-          this.edges[next] |= 1 << (dir < 4 ? (dir + 2) % 4 : 4 + (dir - 4 + 2) % 4);
-        }
-      }
-    }
-    for (let node = 0; node < size; node++) if (this.walkable[node] && this.regions[node] < 0) {
-      let head = 0, tail = 0; this.queue[tail++] = node; this.regions[node] = this.regionCount;
-      while (head < tail) { const current = this.queue[head++]; for (let dir = 0; dir < 8; dir++) if (this.edges[current] & 1 << dir) { const next = current + this.offsets[dir]; if (this.regions[next] < 0) { this.regions[next] = this.regionCount; this.queue[tail++] = next; } } }
-      this.regionCount++;
-    }
-    this.clearance = clearanceMap(this.walkable, terrain.columns, terrain.rows, terrain.dx, terrain.dz);
-    const { openClearance, narrowPenalty } = profile;
-    this.crowding = this.clearance.map(d => { const t = Math.max(0, 1 - d / openClearance); return 1 + narrowPenalty * t * t; });
-    this.buildMs = performance.now() - start;
+    // A build stepped across earlier ticks counts its own time too.
+    this.buildMs = performance.now() - start + prebuilt;
   }
   x(node: number) { return -this.terrain.halfWidth + (node % this.terrain.columns + 0.5) * this.terrain.dx; }
   z(node: number) { return -this.terrain.halfDepth + (Math.floor(node / this.terrain.columns) + 0.5) * this.terrain.dz; }

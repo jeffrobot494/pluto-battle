@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Navigation, infantryProfile, prepareTerrain, type NavigationProfile } from '../src/navigation.ts';
-import type { Terrain } from '../src/terrain.ts';
+import { Navigation, NavigationBuild, infantryProfile, prepareTerrain, type NavigationProfile } from '../src/navigation.ts';
+import { Terrain } from '../src/terrain.ts';
+import { BattleSimulation } from '../src/simulation.ts';
+import { TRUCK_BUILD_CELLS_PER_TICK, TRUCK_GRAPH_RADIUS, TruckGraph, truckProfile } from '../src/truck-navigation.ts';
+import { TRUCK } from '../src/vehicle-types.ts';
 import { ARCHETYPES } from '../src/terrain-archetypes.ts';
 import { DEFAULT_TUNING } from '../src/tuning.ts';
 
@@ -109,4 +112,96 @@ test('a custom profile changes the graph, nodeAt snapping and costs, and path sc
   assert.ok(path && path[0] === a && path[path.length - 1] === b);
   const first = scratch.pathScore; assert.ok(first);
   nav.findPath(nav.x(b), nav.z(b), nav.x(a), nav.z(a)); assert.equal(scratch.pathScore, first);
+});
+
+/** Same graph however the build is sliced: the arrays every consumer reads. */
+function assertSameGraph(a: Navigation, b: Navigation, label: string) {
+  assert.deepEqual(a.walkable, b.walkable, `${label} walkable`); assert.deepEqual(a.edges, b.edges, `${label} edges`);
+  assert.deepEqual(a.regions, b.regions, `${label} regions`); assert.equal(a.regionCount, b.regionCount, `${label} region count`);
+  assert.deepEqual(a.clearance, b.clearance, `${label} clearance`); assert.deepEqual(a.crowding, b.crowding, `${label} crowding`);
+  assert.deepEqual(a.elevation, b.elevation, `${label} elevation`);
+}
+
+test('a graph build sliced on any budget matches a one-shot build', () => {
+  const tuning = { ...DEFAULT_TUNING, count: 60, columns: 8 };
+  for (const id of ['canyon', 'blades', 'massif']) {
+    const { terrain } = prepareTerrain(tuning, 101, id);
+    for (const profile of [infantryProfile(tuning.radius), truckProfile(tuning.truckSlope)]) {
+      const whole = new Navigation(terrain, profile);
+      for (const budget of [1, 7, 300]) {
+        const build = new NavigationBuild(terrain, profile);
+        let steps = 0, last = 0;
+        while (!build.step(budget)) { steps++; assert.ok(build.progress >= last && build.progress < 1); last = build.progress; }
+        assert.equal(build.progress, 1);
+        assertSameGraph(new Navigation(terrain, profile, build), whole, `${id} r=${profile.radius} budget ${budget}`);
+        if (budget === 300) assert.ok(steps <= Math.ceil((2 + 3 / 16) * terrain.columns * terrain.rows / 300) + 1, `${steps} steps`);
+      }
+    }
+  }
+  assert.throws(() => new Navigation(prepareTerrain(tuning, 101, 'canyon').terrain, truckProfile(0.68), new NavigationBuild(Terrain.flat(), truckProfile(0.68))));
+});
+
+test('truck graph cells and edges pass the controller clearance test', () => {
+  const tuning = { ...DEFAULT_TUNING, count: 60, columns: 8 };
+  for (const { id } of ARCHETYPES) {
+    const { terrain } = prepareTerrain(tuning, 202, id), slope = tuning.truckSlope;
+    const nav = new TruckGraph(terrain).finish(slope);
+    let usable = 0;
+    for (let n = 0; n < nav.walkable.length; n++) {
+      if (!nav.walkable[n]) continue;
+      usable++;
+      const x = nav.x(n), z = nav.z(n);
+      assert.ok(nav.clearance[n] >= TRUCK_GRAPH_RADIUS, `${id} cell ${n} clearance ${nav.clearance[n]}`);
+      for (const radius of [TRUCK.radius, TRUCK_GRAPH_RADIUS]) assert.ok(terrain.driveClear(x, z, x, z, radius, slope), `${id} cell ${n} at r=${radius}`);
+      for (let dir = 0; dir < 8; dir++) if (nav.edges[n] & 1 << dir) {
+        const m = n + nav.offsets[dir];
+        assert.ok(nav.walkable[m], `${id} edge to unusable cell`);
+        for (const radius of [TRUCK.radius, TRUCK_GRAPH_RADIUS]) {
+          assert.ok(terrain.driveClear(x, z, nav.x(m), nav.z(m), radius, slope), `${id} edge ${n}->${m} at r=${radius}`);
+          assert.ok(terrain.driveClear(nav.x(m), nav.z(m), x, z, radius, slope), `${id} edge ${m}->${n} at r=${radius}`);
+        }
+      }
+    }
+    assert.ok(usable > nav.walkable.length * 0.1, `${id}: only ${usable} truck cells`);
+  }
+});
+
+test('the fleet builds the truck graph a slice per tick and republishes atomically after a slope change', () => {
+  const tuning = { ...DEFAULT_TUNING, count: 20, columns: 5 };
+  const { terrain, navigation } = prepareTerrain(tuning, 303, 'escarpment');
+  const sim = new BattleSimulation(20, 9, 512, tuning, terrain, navigation), fleet = sim.vehicles;
+  sim.weaponsEnabled = false;
+  assert.ok(fleet.truckGraph); assert.equal(fleet.truckNavigation, null, 'nothing published before the first slice');
+  const units = (2 + 3 / 16) * terrain.columns * terrain.rows, ticks = Math.ceil(units / TRUCK_BUILD_CELLS_PER_TICK);
+  for (let t = 0; t < ticks - 2; t++) sim.step();
+  assert.equal(fleet.truckNavigation, null, 'published early');
+  for (let t = 0; t < 4 && !fleet.truckNavigation; t++) sim.step();
+  const first = fleet.truckNavigation!;
+  assert.ok(first, 'not published on budget');
+  assertSameGraph(first, new Navigation(terrain, truckProfile(tuning.truckSlope)), 'first build');
+  assert.equal(fleet.truckGraph!.builds, 1);
+  for (let t = 0; t < 30; t++) sim.step();
+  assert.equal(fleet.truckNavigation, first, 'no rebuild without a change');
+
+  const before = first.walkable.slice();
+  sim.tuning.truckSlope = 0.3;
+  for (let t = 0; t < ticks - 2; t++) { sim.step(); assert.equal(fleet.truckNavigation, first, 'old graph kept until the new one is complete'); }
+  assert.deepEqual(first.walkable, before, 'the published graph is never written by a rebuild');
+  // Changing the slope again mid-build restarts it for the newest value.
+  sim.tuning.truckSlope = 0.35;
+  for (let t = 0; t < ticks + 4 && fleet.truckNavigation === first; t++) sim.step();
+  const second = fleet.truckNavigation!;
+  assert.notEqual(second, first);
+  assert.equal(fleet.truckGraph!.slope, 0.35); assert.equal(fleet.truckGraph!.builds, 2);
+  assertSameGraph(second, new Navigation(terrain, truckProfile(0.35)), 'rebuild');
+  let lost = 0; for (let n = 0; n < before.length; n++) { assert.ok(!second.walkable[n] || before[n]); lost += before[n] - second.walkable[n]; }
+  assert.ok(lost > 0, 'a lower slope limit removes truck cells');
+});
+
+test('flat battles have no truck graph', () => {
+  const plain = new BattleSimulation(20, 9, 512);
+  assert.equal(plain.vehicles.truckGraph, null);
+  const terrain = Terrain.flat(DEFAULT_TUNING.halfWidth, DEFAULT_TUNING.halfDepth);
+  const explicit = new BattleSimulation(20, 9, 512, DEFAULT_TUNING, terrain, new Navigation(terrain, DEFAULT_TUNING.radius));
+  for (const sim of [plain, explicit]) { for (let t = 0; t < 5; t++) sim.step(); assert.equal(sim.vehicles.truckGraph, null); assert.equal(sim.vehicles.truckNavigation, null); }
 });

@@ -6,6 +6,8 @@ import { effectiveTurretRange } from './tuning.ts';
 import { TruckController } from './truck-controller.ts';
 import { TruckTactics } from './truck-tactics.ts';
 import { TruckTrace } from './truck-trace.ts';
+import { TruckGraph, needsTruckGraph } from './truck-navigation.ts';
+import type { Navigation } from './navigation.ts';
 import { DRIVER, GUNNER, Maneuver, PASSENGER, PULL_AWAY, SEAT_COUNT, TRUCK, TRUCK_TYPE, VEHICLE_TYPES } from './vehicle-types.ts';
 
 const POSES_PER_CREW = 8, CREWS_PER_TICK = 16;
@@ -132,8 +134,12 @@ export class VehicleFleet {
   };
 
   readonly sim: BattleSimulation;
+  /** Builds and owns the truck graph; null on flat, rockless battles, where straight lines are already best. */
+  readonly truckGraph: TruckGraph | null;
   constructor(sim: BattleSimulation) {
     this.sim = sim;
+    // Started with the terrain, not on the first paint, so painting trucks never stalls a frame on a graph build.
+    this.truckGraph = sim.navigation && needsTruckGraph(sim.terrain) ? new TruckGraph(sim.terrain) : null;
     const n = sim.capacity, seats = n * SEAT_COUNT;
     this.active = new Int32Array(n); this.activeIndex = new Int32Array(n).fill(-1); this.free = new Int32Array(n);
     this.id = new Uint32Array(n); this.type = new Uint8Array(n); this.team = new Uint8Array(n);
@@ -157,6 +163,10 @@ export class VehicleFleet {
   }
 
   get range() { return effectiveTurretRange(this.sim.tuning); }
+  /** The published truck graph: null on flat battles and until the first build completes. */
+  get truckNavigation(): Navigation | null { return this.truckGraph?.navigation ?? null; }
+  /** Advances the truck graph build a budgeted slice; a live `truckSlope` change starts a rebuild. */
+  updateNavigation() { this.truckGraph?.update(this.sim.tuning.truckSlope); }
   get pendingCrews() { return this.placement.length - this.placementHead; }
   get pendingDestructions() { return this.wrecks.length - this.wreckHead; }
   onFoot(i: number) { return this.ride[i] < 0 && !this.awaitingEjection[i]; }

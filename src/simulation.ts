@@ -1086,6 +1086,7 @@ export class BattleSimulation {
     this.applyCommands();
     fleet.place(true);
     this.updateNavigation();
+    fleet.updateNavigation();
     this.integrateBodies();
     // Rockets already in flight keep flying after the result; their blasts then only move bodies.
     if (this.result !== 'running') { this.advanceRockets(); return; }
