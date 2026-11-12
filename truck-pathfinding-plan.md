@@ -133,7 +133,7 @@ If any deliberate stop runs past its bound, it counts as stuck.
 
 Any 0.25 units of progress resets the timer. A truck that keeps re-entering the ladder at the same spot is a *loop*, not a stall; the trace reports it as `livelock` and the validation counts it as stuck.
 
-**The one gameplay call.** The last-resort step moves soldiers who could not move on their own. It's the only way to guarantee no stalls when a truck is physically surrounded, and it should be rare. If you'd rather not have it, the alternative is that the crew dismounts after 4 s boxed in, and that truck no longer counts as crewed.
+**Decided: the truck moves the soldiers.** The last-resort step displaces soldiers who could not move on their own. It's the only way to guarantee no stalls when a truck is physically surrounded, and it should be rare. Having the crew dismount after 4 s boxed in was considered and rejected.
 
 ## Cost summary at 5× area
 
