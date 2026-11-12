@@ -19,8 +19,9 @@ import { BENCHMARK_SCENARIOS, VehicleBenchmark, benchmarkTuning, usesTrucks, typ
 import { BattleInput, type GroundPoint } from './battle-input.ts';
 import { UpgradeMenu } from './upgrade-menu.ts';
 import { SoldierCard } from './soldier-card.ts';
-import { BattleRoster, loadRoster, saveRoster } from './soldiers.ts';
+import { BattleRoster, Roster, loadRoster, saveRoster } from './soldiers.ts';
 import { SoldierList, SoldiersTab } from './soldiers-panel.ts';
+import { ReplayPlayer, ReplayRecorder, validReplay, type Replay, type ReplayEvent } from './replay.ts';
 import { NEUTRAL_ZONE_COLOR, TARGET_KEY, UPGRADE_TARGETS, UPGRADES, zoneRadius, type Upgrade, type UpgradeId, type UpgradeTarget, type UpgradeTargetId } from './upgrades.ts';
 
 const icons = {
@@ -48,7 +49,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </section>
     <div class="field-label" aria-hidden="true"><span class="coordinate-line"></span><span>07 / ALIEN SURFACE</span><small>NO ORDERS REQUIRED.</small></div>
     <div class="view-controls" aria-label="Camera controls"><button id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><span></span><button id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button></div>
-    <section id="outcome" class="outcome" hidden aria-live="polite"><span>ENGAGEMENT COMPLETE</span><h2 id="outcome-title"></h2><p id="outcome-description"></p><button id="play-again">New battle, new map <span>↗</span></button></section>
+    <section id="outcome" class="outcome" hidden aria-live="polite"><span>ENGAGEMENT COMPLETE</span><h2 id="outcome-title"></h2><p id="outcome-description"></p><button id="play-again">New battle, new map <span>↗</span></button> <button id="watch-replay">Watch replay <span>▶</span></button></section>
+    <div id="replay-taps" class="replay-taps" aria-hidden="true"></div>
+    <section id="replay-bar" class="replay-bar" hidden aria-label="Replay controls"><span class="replay-badge">● REPLAY</span><span id="replay-progress">00:00 / 00:00</span><span class="replay-speeds">${[0.5, 1, 2, 4, 8].map(s => `<button data-speed="${s}" aria-pressed="${s === 1}">${s}×</button>`).join('')}</span><button id="replay-camera" aria-pressed="true">Player camera</button><button id="replay-exit">Exit replay</button><span id="replay-sync" role="status"></span><span id="replay-key"></span></section>
     <div id="paused-notice" class="paused-notice" hidden>SIMULATION PAUSED</div>
     <button id="explosion-toggle" class="explosion-toggle" aria-pressed="false" aria-describedby="explosion-status"><span aria-hidden="true">✳</span> Test explosions <small>OFF</small></button>
     <p id="explosion-status" class="explosion-status" role="status" hidden>Click or tap ground to detonate · drag to pan</p>
@@ -81,6 +84,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <p>Restart replays this map; New map (N) rolls a different landscape. Target: 60 FPS at 500 vs 500 on Pixel 10. Physical-phone validation pending.</p>
       <div class="settings"><label for="benchmark-scenario">Benchmark workload <select id="benchmark-scenario">${BENCHMARK_SCENARIOS.map(({ id, label }) => `<option value="${id}">${label}</option>`).join('')}</select></label><button id="benchmark-start">Benchmark 500 vs 500 · 15 min</button><button id="benchmark-save" disabled>Save benchmark report</button></div>
       <p id="benchmark-status" role="status">5-minute warmup, then 10-minute recording. Keep the page visible.</p>
+      <div class="settings"><button id="replay-watch-last">Watch last replay</button><button id="replay-save">Save replay file</button><button id="replay-load-button">Load replay file</button><input id="replay-load" type="file" accept=".json,application/json" hidden></div>
+      <p id="replay-status" role="status">Every battle is recorded. Replays play back on this device only (prototype).</p>
     </aside>
     <div id="error" hidden role="alert"></div>
   </main>`;
@@ -146,6 +151,26 @@ let sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, tuning, prepared?
 // Plutonians are drafted at random from the persistent soldier pool every battle.
 const roster = loadRoster(); saveRoster(roster);
 let battleRoster = new BattleRoster(roster, sim), rosterDirty = false;
+// Replays (prototype): every battle records its inputs; the viewer re-runs them through the same sim.
+let recorder: ReplayRecorder | null = null, player: ReplayPlayer | null = null, lastReplay: Replay | null = null;
+/** The player's own settings while a replay borrows the recorded ones. */
+let replayBackup: { tuning: typeof tuning; equipment: EquipmentSettings } | null = null;
+function startRecording() {
+  recorder = new ReplayRecorder({
+    version: 1, perTeam, seed, terrainSeed, flat: flatFixture, archetype: forcedArchetype,
+    tuning: { ...sim.tuning }, equipment: copyEquipment(sim.equipment), roster: roster.serialize(),
+    recordedAt: new Date().toISOString(), screen: { width: innerWidth, height: innerHeight },
+  }, sim);
+}
+function finishRecording() {
+  if (recorder && recorder.sim.tick > 0) lastReplay = recorder.finish();
+  recorder = null;
+}
+/** A throwaway roster for playback, so replayed deaths and promotions never touch the player's soldiers. */
+function replayRoster(replay: Replay) {
+  const copy = new Roster(); if (!copy.restore(replay.header.roster)) copy.reset(); return copy;
+}
+startRecording();
 function flushRoster() {
   if (battleRoster.recordDeaths() || battleRoster.recordOutcome()) rosterDirty = true;
   if (rosterDirty) { saveRoster(roster); rosterDirty = false; }
@@ -300,33 +325,76 @@ function setPaused(value: boolean) {
   pauseButton.setAttribute('aria-label', value ? 'Resume battle' : 'Pause battle');
   $('#paused-notice').hidden = !value || sim.result !== 'running'; updateHud();
 }
-function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, benchmark?: BenchmarkScenario) {
-  if (equipmentTab && !equipmentTab.valid) { tuningPanel.showPage(equipmentTab.id); return false; }
+function restart(count?: number, nextSeed?: number, nextTerrainSeed?: number, benchmark?: BenchmarkScenario, replay?: Replay) {
+  if (!replay && replayBackup) endReplayMode();
+  if (!replay && equipmentTab && !equipmentTab.valid) { tuningPanel.showPage(equipmentTab.id); return false; }
   stopBenchmark('Benchmark stopped: new battle.');
+  finishRecording();
+  if (replay) {
+    replayBackup ??= { tuning: { ...tuning }, equipment: copyEquipment(equipment) };
+    tuning = { ...replay.header.tuning }; equipment = copyEquipment(replay.header.equipment);
+  }
   const candidate = benchmark ? benchmarkTuning(tuning, benchmark) : { ...tuning };
   if (count !== undefined) { candidate.count = count; candidate.columns = Math.ceil(Math.sqrt(count)); }
   if (nextSeed !== undefined) candidate.seed = nextSeed;
   if (!benchmark) tuning = candidate;
   if (deploymentError(candidate)) { tuningPanel.sync(tuning, sim.tuning); tuningPanel.toggle(true); return false; }
   perTeam = candidate.count; seed = candidate.seed;
-  terrainSeed = nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
-  prepared = flatFixture ? null : prepareTerrain(candidate, terrainSeed, forcedArchetype);
+  terrainSeed = replay ? replay.header.terrainSeed : nextTerrainSeed === undefined ? freshMapSeed() : nextTerrainSeed >>> 0;
+  prepared = (replay ? replay.header.flat : flatFixture) ? null : prepareTerrain(candidate, terrainSeed, replay ? replay.header.archetype : forcedArchetype);
   stopTruckTrace();
   flushRoster();
   sim = new BattleSimulation(perTeam, seed, CONFIG.capacity, candidate, prepared?.terrain, prepared?.navigation, equipment); accumulator = 0; endAge = 0;
   deploymentRevision = 0; upgradeMenu.setTruckRange(sim.vehicles.range);
-  battleRoster = new BattleRoster(roster, sim); soldiersTab?.refresh();
+  battleRoster = new BattleRoster(replay ? replayRoster(replay) : roster, sim); soldiersTab?.refresh();
+  if (replay) beginReplayMode(replay); else startRecording();
   setExplosionTesting(false);
   input.reset(); zone = null; renderer.setZone(null); selectSoldier(0); upgradeMenu.select(null);
   audio.reset(sim);
   updateMapLabel();
   intervalCount = intervalCursor = frames = slowFrames = 0; simMs = renderMs = 0;
   previousTime = 0; droppedSimulationSeconds = 0;
-  saveTuning(tuning); tuningPanel.sync(tuning, sim.tuning);
-  saveEquipment(equipment); equipmentTab.sync(equipment, sim.equipment, perTeam);
+  if (!replay) { saveTuning(tuning); saveEquipment(equipment); }
+  tuningPanel.sync(tuning, sim.tuning); equipmentTab.sync(equipment, sim.equipment, perTeam);
   $<HTMLSelectElement>('#deployment').value = [100, 250, 500].includes(perTeam) ? String(perTeam) : 'custom';
   outcome.hidden = true; setPaused(false); updateHud();
   return true;
+}
+const replayBar = $('#replay-bar'), replayTaps = $('#replay-taps');
+function beginReplayMode(replay: Replay) {
+  const previous = player;
+  player = new ReplayPlayer(replay, sim, showReplayTap);
+  if (previous) { player.speed = previous.speed; player.followCamera = previous.followCamera; }
+  replayBar.hidden = false; $('#replay-key').textContent = ''; replayTaps.replaceChildren();
+  toggleDiagnostics(false); updateReplayBar();
+}
+/** Back to the player's own settings; the caller then starts a normal battle. */
+function endReplayMode() {
+  player = null; replayBar.hidden = true; replayTaps.replaceChildren();
+  if (replayBackup) { tuning = replayBackup.tuning; equipment = replayBackup.equipment; replayBackup = null; }
+}
+function watchReplay(replay?: Replay) {
+  if (!player) finishRecording();
+  const chosen = replay ?? player?.replay ?? lastReplay;
+  if (!chosen) { $('#replay-status').textContent = 'No replay yet. Play a battle first.'; return false; }
+  return restart(undefined, chosen.header.seed, chosen.header.terrainSeed, undefined, chosen);
+}
+function showReplayTap(tap: Extract<ReplayEvent, { kind: 'tap' }>) {
+  if (tap.x === undefined || tap.y === undefined) { $('#replay-key').textContent = tap.label; return; }
+  const dot = document.createElement('div'); dot.className = 'replay-tap';
+  dot.style.left = `${tap.x * 100}%`; dot.style.top = `${tap.y * 100}%`;
+  const label = document.createElement('span'); label.textContent = tap.label; dot.append(label);
+  replayTaps.append(dot); setTimeout(() => dot.remove(), 1600);
+}
+function updateReplayBar() {
+  if (!player) return;
+  $('#replay-progress').textContent = `${elapsedLabel(sim.tick * CONFIG.step)} / ${elapsedLabel(player.replay.endTick * CONFIG.step)}${player.finished ? ' · END' : ''}`;
+  for (const button of replayBar.querySelectorAll<HTMLButtonElement>('[data-speed]')) button.setAttribute('aria-pressed', String(Number(button.dataset.speed) === player.speed));
+  $('#replay-camera').setAttribute('aria-pressed', String(player.followCamera));
+  $('#replay-camera').textContent = player.followCamera ? 'Player camera' : 'Free camera';
+  const sync = $('#replay-sync');
+  sync.textContent = player.desyncTick !== null ? `DESYNC at ${elapsedLabel(player.desyncTick * CONFIG.step)}` : player.checkedHashes ? `in sync · ${player.checkedHashes} checks` : '';
+  sync.classList.toggle('desync', player.desyncTick !== null);
 }
 /** Same map, fresh battle. */
 const restartMap = () => restart(undefined, undefined, terrainSeed);
@@ -374,7 +442,7 @@ function updateHud() {
   const died = battleRoster.recordDeaths() > 0, ended = battleRoster.recordOutcome();
   if (died || ended) { rosterDirty = true; soldiersTab?.refresh(); }
   if (sim.result !== 'running') flushRoster();
-  soldierCard.update(sim); soldierList.update(battleRoster);
+  soldierCard.update(sim); soldierList.update(battleRoster); updateReplayBar();
   plutoCount.textContent = String(sim.alive[0]); sectoidCount.textContent = String(sim.alive[1]); battleTime.textContent = elapsedLabel(sim.battleTime);
   $('#explosion-status').textContent = sim.result !== 'running' ? 'Battle ended · restart to test explosions' : paused ? 'Paused · resume to test explosions' : 'Click or tap ground to detonate · drag to pan';
   if (paused || sim.result !== 'running') renderer.setExplosionPreview(null, tuning.explosionRadius);
@@ -428,6 +496,7 @@ function startBenchmark(warmup = 300, duration = 600, scenario: BenchmarkScenari
   if (!BENCHMARK_SCENARIOS.some(({ id }) => id === scenario)) return false;
   if (usesTrucks(scenario) && effectiveTurretRange(tuning) === null) { $('#benchmark-status').textContent = TURRET_RANGE_ERROR; return false; }
   if (!restart(undefined, seed, terrainSeed, scenario)) return false;
+  recorder = null; // Benchmarks write health directly, which a replay cannot reproduce.
   sim.hp.fill(1e8, 0, sim.used);
   benchmarkFixture = new VehicleBenchmark(scenario);
   capture.start(terrainSeed, seed, sim.tuning, warmup, duration, scenario);
@@ -456,6 +525,41 @@ function downloadJson(json: string, filename: string) {
 $('#benchmark-save').addEventListener('click', () => {
   if (capture.report) downloadJson(JSON.stringify(capture.report, null, 2), `pluto-1000-${capture.report.scenario}-${terrainSeed}.json`);
 });
+$('#watch-replay').addEventListener('click', () => watchReplay());
+$('#replay-watch-last').addEventListener('click', () => watchReplay());
+$('#replay-exit').addEventListener('click', () => newMap());
+$('#replay-camera').addEventListener('click', () => { if (player) { player.followCamera = !player.followCamera; updateReplayBar(); } });
+for (const button of replayBar.querySelectorAll<HTMLButtonElement>('[data-speed]')) button.addEventListener('click', () => { if (player) { player.speed = Number(button.dataset.speed); updateReplayBar(); } });
+$('#replay-save').addEventListener('click', () => {
+  // Mid-battle, this saves the battle so far and keeps recording.
+  const replay = player?.replay ?? (recorder && recorder.sim.tick > 0 ? recorder.finish() : lastReplay);
+  if (!replay) { $('#replay-status').textContent = 'No replay yet. Play a battle first.'; return; }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(replay)], { type: 'application/json' }));
+  const link = document.createElement('a'); link.href = url; link.download = `pluto-replay-${replay.header.recordedAt.replace(/[:.]/g, '-')}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('#replay-load-button').addEventListener('click', () => $<HTMLInputElement>('#replay-load').click());
+$<HTMLInputElement>('#replay-load').addEventListener('change', async event => {
+  const input = event.currentTarget as HTMLInputElement, file = input.files?.[0]; input.value = '';
+  if (!file) return;
+  try {
+    const data: unknown = JSON.parse(await file.text());
+    if (validReplay(data)) watchReplay(data); else $('#replay-status').textContent = 'That file is not a Pluto Battle replay.';
+  } catch { $('#replay-status').textContent = 'That replay file could not be read.'; }
+});
+/** What a tap hit, in words a viewer can read. */
+function tapLabel(target: EventTarget | null) {
+  if (!(target instanceof Element)) return 'screen';
+  if (target === renderer.webgl.domElement) return 'battlefield';
+  const element = target.closest('button, summary, select, input, label, [role="button"], [role="tab"]') ?? target;
+  const text = element.getAttribute('aria-label') || element.textContent?.trim().replace(/\s+/g, ' ') || element.id || element.tagName.toLowerCase();
+  return text.slice(0, 40);
+}
+document.addEventListener('pointerdown', event => { recorder?.tap(tapLabel(event.target), event.clientX / innerWidth, event.clientY / innerHeight); }, { capture: true, signal: audioEvents.signal });
+document.addEventListener('keydown', event => { if (!event.repeat) recorder?.tap(`key ${event.key === ' ' ? 'Space' : event.key}`); }, { capture: true, signal: audioEvents.signal });
+// Dev route: `?replay=<url>` opens a saved replay file.
+const replayUrl = parameters.get('replay');
+if (replayUrl) fetch(replayUrl).then(response => response.json()).then((data: unknown) => { if (validReplay(data)) watchReplay(data); else throw new Error('not a replay'); })
+  .catch(error => { $('#error').hidden = false; $('#error').textContent = `Replay could not load: ${error instanceof Error ? error.message : error}`; });
 
 function truckTraceReport() { return sim.vehicles.trace?.report() ?? savedTruckTrace; }
 function updateTruckTraceControls() {
@@ -563,12 +667,15 @@ function frame(now: number) {
   const start = performance.now();
   if (capture.active) sim.weaponsEnabled = !capture.movementPhase;
   // After the result, bodies and blast effects keep settling while the battle clock stays fixed.
-  const advancing = sim.result === 'running' || sim.activeBodies > 0 || sim.time - sim.endedAt < CONFIG.corpseLifetime;
+  // A replay holds on its last recorded frame instead of inventing what happened next.
+  const advancing = (sim.result === 'running' || sim.activeBodies > 0 || sim.time - sim.endedAt < CONFIG.corpseLifetime) && !(player && sim.tick >= player.replay.endTick);
   if (!paused && advancing) {
     droppedSimulationSeconds += Math.max(0, elapsed - 0.1);
-    accumulator += Math.min(elapsed, 0.1);
+    const speed = player?.speed ?? 1;
+    accumulator += Math.min(elapsed, 0.1) * speed;
     let steps = 0;
-    while (accumulator >= CONFIG.step && steps < 4) {
+    while (accumulator >= CONFIG.step && steps < 4 * Math.max(1, speed)) {
+      if (player && sim.tick >= player.replay.endTick) { accumulator = 0; break; }
       benchmarkFixture?.beforeStep(sim);
       sim.step(); accumulator -= CONFIG.step; steps++; hzTicks++;
     }
@@ -580,6 +687,9 @@ function frame(now: number) {
   audio.update(sim, !paused);
   if (!paused) renderer.adapt(lastElapsed);
   updateZone(now);
+  // Taps and inputs that arrived while the battle was paused or over still play back.
+  if (player) { player.feed(); player.applyCamera(renderer, sim.tick + (paused || !advancing ? 0 : accumulator / CONFIG.step)); }
+  else recorder?.camera(renderer);
   renderer.update(sim, paused || !advancing ? 1 : accumulator / CONFIG.step, sim.time + endAge);
   soldierCard.position(sim, renderer);
   lastSimMs = afterSim - start; lastRenderMs = performance.now() - afterSim;
@@ -602,6 +712,10 @@ const api = {
   get map() { const t = sim.terrain; return { archetype: t.archetype, name: t.name, region: t.region, defender: t.defender, repairs: t.repairs, ramps: t.ramps.length }; },
   replay() { tuning = { ...sim.tuning }; return restart(undefined, seed, terrainSeed); },
   startBenchmark,
+  get lastReplay() { return player ? player.replay : recorder && recorder.sim.tick > 0 ? recorder.finish() : lastReplay; },
+  watchReplay,
+  get replayPlayback() { return player && { tick: sim.tick, endTick: player.replay.endTick, finished: player.finished, desyncTick: player.desyncTick, checkedHashes: player.checkedHashes, speed: player.speed }; },
+  setReplaySpeed(speed: number) { if (player) player.speed = speed; },
   startTruckTrace, stopTruckTrace, truckTraceReport,
   get benchmark() { return { active: capture.active, report: capture.report }; },
   get explosionTesting() { return explosionTesting; }, setExplosionTesting,
