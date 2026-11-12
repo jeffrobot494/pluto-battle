@@ -1,5 +1,5 @@
 import type { BattleSimulation } from './simulation.ts';
-import type { TuningValues } from './tuning.ts';
+import { TUNING, type TuningValues } from './tuning.ts';
 import type { DeploymentReport } from './vehicles.ts';
 
 export const BENCHMARK_SCENARIOS = [
@@ -12,10 +12,17 @@ export const BENCHMARK_SCENARIOS = [
 export type BenchmarkScenario = typeof BENCHMARK_SCENARIOS[number]['id'];
 export function usesTrucks(mode: BenchmarkScenario) { return mode !== 'infantry' && mode !== 'infantry-spread'; }
 
+const AREA_KEYS = new Set<string>(['halfWidth', 'halfDepth', 'frontline']);
+const baseLimits = new Map(TUNING.filter(d => AREA_KEYS.has(d.key)).map(d => [d.key, d.max]));
+/** Capture fixture only: lets a benchmark battlefield exceed the Tuning size limits by `area` (1 restores them). */
+export function liftBenchmarkLimits(area: number) {
+  for (const definition of TUNING) if (AREA_KEYS.has(definition.key)) definition.max = baseLimits.get(definition.key)! * Math.sqrt(area);
+}
+
 /** Keep matching formations for each infantry comparison. Use enough room to pull 1,000 separate trucks away. */
-export function benchmarkTuning(tuning: TuningValues, mode: BenchmarkScenario): TuningValues {
-  const spread = mode === 'sparse' || mode === 'infantry-spread';
-  return { ...tuning, count: 500, columns: 23, halfWidth: 42, halfDepth: 54, frontline: 8, radius: Math.min(0.45, tuning.radius),
+export function benchmarkTuning(tuning: TuningValues, mode: BenchmarkScenario, area = 1): TuningValues {
+  const spread = mode === 'sparse' || mode === 'infantry-spread', side = Math.sqrt(area);
+  return { ...tuning, count: 500, columns: 23, halfWidth: 42 * side, halfDepth: 54 * side, frontline: 8 * side, radius: Math.min(0.45, tuning.radius),
     columnSpacing: spread ? 2.35 : 1.4, rowSpacing: spread ? 1.88 : 1.16, jitterX: Math.min(0.04, tuning.jitterX), jitterZ: Math.min(0.06, tuning.jitterZ) };
 }
 

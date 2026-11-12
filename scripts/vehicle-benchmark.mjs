@@ -5,6 +5,9 @@ import { launchBattleBrowser, serveBattleBuild } from './battle-browser.mjs';
 const warmup = Number(process.env.BATTLE_WARMUP ?? 5);
 const duration = Number(process.env.BATTLE_SECONDS ?? 30);
 assert.ok(warmup >= 0 && warmup <= 300 && duration >= 1 && duration <= 600, 'Use 0–300 seconds of warmup and 1–600 seconds of recording.');
+// Battlefield area multiplier, past the Tuning limits (5 is the planned large-map size).
+const area = Number(process.env.BATTLE_AREA ?? 1);
+assert.ok(area >= 1 && area <= 8, 'Use a BATTLE_AREA from 1 through 8.');
 const scenarios = (process.env.BATTLE_SCENARIOS ?? 'infantry,packed,infantry-spread,sparse,mixed').split(',');
 const url = new URL(process.env.BATTLE_URL ?? 'http://localhost:5181/');
 if (!url.searchParams.has('terrain')) url.searchParams.set('terrain', '74319');
@@ -19,7 +22,7 @@ try {
   await page.evaluate(quality => window.__battle.renderer.setQuality(quality), process.env.BATTLE_QUALITY ?? 'low');
   const reports = [];
   for (const scenario of scenarios) {
-    const started = await page.evaluate(({ warmup, duration, scenario }) => window.__battle.startBenchmark(warmup, duration, scenario), { warmup, duration, scenario });
+    const started = await page.evaluate(({ warmup, duration, scenario, area }) => window.__battle.startBenchmark(warmup, duration, scenario, area), { warmup, duration, scenario, area });
     assert.ok(started, `Could not start ${scenario}`);
     await page.waitForFunction(() => !window.__battle.benchmark.active, null, { timeout: (warmup + duration + 60) * 1000 });
     const report = await page.evaluate(() => window.__battle.benchmark.report);
@@ -32,6 +35,6 @@ try {
   assert.deepEqual(errors, []);
   await mkdir('artifacts', { recursive: true });
   await writeFile(process.env.BATTLE_REPORT ?? 'artifacts/vehicle-benchmark.json', JSON.stringify({
-    note: 'Desktop development measurement. Physical Pixel 10 acceptance is separate.', map: await page.evaluate(() => window.__battle.map), reports,
+    note: 'Desktop development measurement. Physical Pixel 10 acceptance is separate.', area, map: await page.evaluate(() => window.__battle.map), reports,
   }, null, 2));
 } finally { await browser.close(); }
